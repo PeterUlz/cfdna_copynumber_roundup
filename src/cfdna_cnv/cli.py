@@ -40,6 +40,11 @@ def _build_ichorcna_parser(sub: argparse._SubParsersAction) -> None:
     # Tumor fraction
     p.add_argument("--tf-threshold", type=float, default=0.03,
                    help="Minimum tumor fraction (default 3%%).")
+    p.add_argument("--min-reads", type=int, default=1_000_000,
+                   help="Minimum total reads from WIG file to include a "
+                        "sample (default 1,000,000). Samples below this "
+                        "threshold are excluded before TF filtering. "
+                        "Set to 0 to disable.")
     # Broad CNA
     p.add_argument("--amp-min-cn", type=int, default=4,
                    help="Minimum copy number to call focal amplification "

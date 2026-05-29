@@ -114,10 +114,28 @@ def run(args: argparse.Namespace) -> None:
     print(f"      Written: {tf_out}")
 
     # ── 2. TF filter ─────────────────────────────────────────────────────────
-    threshold = args.tf_threshold
-    print(f"\n[2/7] Filtering at TF >= {threshold*100:.1f}% …")
-    high_tf     = tf_df[tf_df["tumor_fraction"] >= threshold]
-    low_tf      = tf_df[tf_df["tumor_fraction"] <  threshold]
+    threshold  = args.tf_threshold
+    min_reads  = args.min_reads
+    print(f"\n[2/7] Filtering at TF >= {threshold*100:.1f}%"
+          f"  and  reads >= {min_reads:,} …")
+
+    has_reads = "total_reads" in tf_df.columns and tf_df["total_reads"].notna().any()
+
+    # Apply read-depth filter first
+    if has_reads and min_reads > 0:
+        # Only exclude samples where reads are known AND below threshold.
+        # Samples with NA reads (no WIG file found) are kept.
+        low_reads_mask  = (tf_df["total_reads"].notna() &
+                           (tf_df["total_reads"] < min_reads))
+        n_low_reads     = int(low_reads_mask.sum())
+        if n_low_reads:
+            print(f"      Samples EXCLUDED (< {min_reads:,} reads): {n_low_reads}")
+        tf_df_filtered = tf_df[~low_reads_mask]
+    else:
+        tf_df_filtered = tf_df
+
+    high_tf     = tf_df_filtered[tf_df_filtered["tumor_fraction"] >= threshold]
+    low_tf      = tf_df_filtered[tf_df_filtered["tumor_fraction"] <  threshold]
     high_tf_samples = high_tf["sample"].tolist()
     print(f"      Samples PASSING: {len(high_tf_samples)}")
     print(f"      Samples EXCLUDED (low TF): {len(low_tf)}")
