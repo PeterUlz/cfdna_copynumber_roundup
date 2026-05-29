@@ -1,0 +1,194 @@
+"""
+cBioPortal CNA frequency workflow orchestration.
+"""
+from __future__ import annotations
+
+import argparse
+import sys
+from pathlib import Path
+
+import pandas as pd
+
+from ..common.cosmic import load_cosmic_cgc, annotate_with_cgc
+from ..cbio.loader import load_entity_files, make_bins
+from ..cbio.liftover import liftover_entity_files, check_chain_file, check_liftover_binary
+from ..cbio.frequencies import (
+    compute_frequencies,
+    detect_focal_amps_cbio,
+    compute_focal_amp_frequencies,
+)
+from ..cbio.plots import plot_cna_frequencies, plot_focal_amp_frequencies
+
+
+def _parse_paths(raw: str) -> list[Path]:
+    return [Path(p.strip()) for p in raw.split(";") if p.strip()]
+
+
+def run(args: argparse.Namespace) -> None:
+    # ── Build entity → list[Path] map ────────────────────────────────────────
+    entity_files: dict[str, list[Path]] = {}
+    for attr in ("breast", "prostate", "colorectal"):
+        val = getattr(args, attr, None)
+        if val:
+            entity_files[attr] = _parse_paths(val)
+    for pair in getattr(args, "seg", []):
+        if "=" not in pair:
+            print(f"[ERROR] --seg entries must be NAME=FILE, got: {pair}")
+            sys.exit(1)
+        name, fpath = pair.split("=", 1)
+        entity_files[name.strip()] = _parse_paths(fpath)
+
+    if not entity_files:
+        print("[ERROR] No input files. Use --breast / --prostate / "
+              "--colorectal / --seg.")
+        sys.exit(1)
+
+    for entity, paths in entity_files.items():
+        for path in paths:
+            if not path.is_file():
+                print(f"[ERROR] File not found for '{entity}': {path}")
+                sys.exit(1)
+
+    outdir = Path(args.output)
+    outdir.mkdir(parents=True, exist_ok=True)
+
+    # ── Load COSMIC CGC ───────────────────────────────────────────────────────
+    cgc_df = None
+    if args.cosmic_cgc:
+        cgc_path = Path(args.cosmic_cgc)
+        if not cgc_path.is_file():
+            print(f"[ERROR] COSMIC CGC file not found: {cgc_path}")
+            sys.exit(1)
+        try:
+            cgc_df = load_cosmic_cgc(cgc_path)
+        except ValueError as e:
+            print(f"[ERROR] {e}"); sys.exit(1)
+    else:
+        print("[INFO] No --cosmic-cgc provided; gene annotation skipped.")
+
+    print("=" * 65)
+    print("cBioPortal CNA Frequency Analysis")
+    print("=" * 65)
+
+    # ── 1. Load segments ──────────────────────────────────────────────────────
+    print(f"\n[1/4] Loading segment files …")
+    seg_by_entity = load_entity_files(entity_files, args.min_seg_size)
+
+    # ── 1b. LiftOver hg19 → hg38 (optional) ─────────────────────────────────
+    if getattr(args, "liftover", False):
+        if not args.chain_file:
+            print("[ERROR] --chain-file is required when --liftover is set.")
+            print("        Download: wget https://hgdownload.gi.ucsc.edu/"
+                  "goldenPath/hg19/liftOver/hg19ToHg38.over.chain.gz")
+            sys.exit(1)
+        try:
+            check_chain_file(args.chain_file)
+            check_liftover_binary(args.liftover_bin)
+        except RuntimeError as e:
+            print(f"[ERROR] {e}")
+            sys.exit(1)
+
+        print(f"\n[1b] Lifting coordinates hg19 → hg38 "
+              f"(min-match={args.liftover_min_match}) …")
+        seg_by_entity = liftover_entity_files(
+            seg_by_entity,
+            chain_file   = args.chain_file,
+            liftover_bin = args.liftover_bin,
+            min_match    = args.liftover_min_match,
+        )
+
+    # ── 2. Broad CNA frequencies ──────────────────────────────────────────────
+    print(f"\n[2/4] Computing broad CNA frequencies "
+          f"(bin={args.bin_size//1_000_000} Mbp, "
+          f"gain>{args.gain_threshold}, loss<{args.loss_threshold}) …")
+    bins_df          = make_bins(args.bin_size)
+    freq_by_entity:  dict[str, pd.DataFrame] = {}
+    all_freq_frames: list[pd.DataFrame]      = []
+
+    for entity, seg_df in seg_by_entity.items():
+        print(f"      Processing {entity} …")
+        freq = compute_frequencies(
+            seg_df, bins_df,
+            gain_threshold=args.gain_threshold,
+            loss_threshold=args.loss_threshold,
+        )
+        freq_by_entity[entity] = freq
+        out_tsv = outdir / f"{entity}_cna_frequencies.tsv"
+        freq.to_csv(out_tsv, sep="\t", index=False)
+        print(f"      Written: {out_tsv}")
+        all_freq_frames.append(freq)
+
+    combined = pd.concat(all_freq_frames, ignore_index=True)
+    comb_out = outdir / "combined_cna_frequencies.tsv"
+    combined.to_csv(comb_out, sep="\t", index=False)
+    print(f"      Written: {comb_out}")
+
+    # ── 3. Broad CNA plot ─────────────────────────────────────────────────────
+    print(f"\n[3/4] Generating genome-wide CNA frequency plot …")
+    plot_cna_frequencies(freq_by_entity, outdir / "cna_frequency_plot")
+
+    # ── 4. Focal amplifications ───────────────────────────────────────────────
+    print(f"\n[4/4] Detecting focal amplifications …")
+    print(f"      (size {args.focal_min_bp//1000}–{args.focal_max_bp//1000} kbp, "
+          f"seg.mean >= {args.focal_log2_min}, "
+          f"delta >= {args.focal_log2_delta} vs "
+          f"{args.focal_flank_bp//1_000_000} Mbp background)")
+
+    all_focal_frames: list[pd.DataFrame] = []
+    for entity, seg_df in seg_by_entity.items():
+        n_patients = seg_df["patient"].nunique()
+        print(f"      [{entity}] {n_patients} patients …")
+
+        focal = detect_focal_amps_cbio(
+            seg_df,
+            focal_min_bp = args.focal_min_bp,
+            focal_max_bp = args.focal_max_bp,
+            log2_min     = args.focal_log2_min,
+            log2_delta   = args.focal_log2_delta,
+            flank_bp     = args.focal_flank_bp,
+        )
+        print(f"        Found {len(focal)} focal amp segments in "
+              f"{focal['patient'].nunique() if not focal.empty else 0} patients.")
+
+        focal = annotate_with_cgc(focal, cgc_df)
+
+        focal_out = outdir / f"{entity}_focal_amplifications.tsv"
+        focal.to_csv(focal_out, sep="\t", index=False)
+        print(f"        Written: {focal_out}")
+
+        focal_freq = compute_focal_amp_frequencies(focal, n_patients, entity)
+        if not focal_freq.empty:
+            all_focal_frames.append(focal_freq)
+            plot_focal_amp_frequencies(
+                focal_freq, entity,
+                outdir / f"focal_amp_plot_{entity}",
+                min_freq=args.focal_min_freq,
+            )
+
+    if all_focal_frames:
+        combined_focal = pd.concat(all_focal_frames, ignore_index=True)
+        freq_out = outdir / "focal_amp_frequencies.tsv"
+        combined_focal.to_csv(freq_out, sep="\t", index=False)
+        print(f"      Written: {freq_out}")
+    else:
+        combined_focal = pd.DataFrame()
+        print("      No focal amplifications detected.")
+
+    # ── Summary ───────────────────────────────────────────────────────────────
+    print("\n" + "=" * 65)
+    print("SUMMARY")
+    print("=" * 65)
+    for entity, freq in freq_by_entity.items():
+        from ..common.constants import ENTITY_PALETTE
+        n_pts    = int(freq["n_total"].iloc[0])
+        n_gained = int((freq["freq_gain"] > 0).sum())
+        n_lost   = int((freq["freq_loss"] > 0).sum())
+        label    = ENTITY_PALETTE.get(entity, {}).get("label", entity)
+        n_loci   = (len(combined_focal[combined_focal["entity"] == entity])
+                    if not combined_focal.empty else 0)
+        print(f"  {label:25s}: {n_pts:4d} patients | "
+              f"{n_gained:4d} bins with gain | "
+              f"{n_lost:4d} bins with loss | "
+              f"{n_loci:4d} focal amp loci")
+    print(f"\nResults written to: {outdir.resolve()}")
+    print("=" * 65)

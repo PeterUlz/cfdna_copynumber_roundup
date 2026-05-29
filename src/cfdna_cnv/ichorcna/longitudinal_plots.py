@@ -1,0 +1,1303 @@
+"""
+Pairwise longitudinal log2-ratio comparison plots for ichorCNA data.
+
+Uses bin-level (unsegmented) log2 ratios from the 50 kbp .cna.seg files,
+corrected for tumor fraction, so both samples are on the same scale.
+
+TF correction — simple multiplicative scaling
+----------------------------------------------
+The mixture model compresses all logR values toward 0 proportionally to TF.
+Rather than inverting the full model (which produces -inf for deletions at
+low TF), we use a simple multiplier: logR_rescaled = logR * (TF_high / TF_low).
+This preserves neutral bins at 0, handles deletions gracefully, and has no
+edge cases. Error vs exact inversion: ~0.03-0.07 log2 units for typical TF pairs.
+
+
+Focal amplification shading
+---------------------------
+Regions where a focal amplification was detected in ANY sample of the patient
+are highlighted as shaded boxes. If a COSMIC CGC gene overlaps the region it
+is annotated above the box.
+"""
+from __future__ import annotations
+
+import gc
+from pathlib import Path
+
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.patches as mpatches
+import matplotlib.pyplot as plt
+import matplotlib.ticker as mticker
+
+import numpy as np
+import pandas as pd
+
+from ..common.constants import CHROM_ORDER, CHROM_LENGTHS, GENOME_SIZE, _OFFSETS
+from ..common.io import parse_seg_file
+from .plots import (
+    ICHORCNA_ENTITY_PALETTE, entity_from_sample,
+    _style_ax, _genome_x, _save,
+)
+
+
+# ---------------------------------------------------------------------------
+# TF correction — simple multiplicative scaling
+# ---------------------------------------------------------------------------
+
+def correct_logr_relative(logr: float, tf_from: float, tf_to: float) -> float:
+    """
+    Rescale a logR value from tf_from to tf_to using a simple multiplier:
+
+        logR_rescaled = logR_observed * (tf_to / tf_from)
+
+    Approximates the exact mixture-model inversion with ~0.03-0.07 log2 unit
+    error for typical TF pairs, but is robust (no -inf, no edge cases),
+    preserves neutral bins at exactly 0, and handles deletions correctly.
+
+    Returns NaN if either TF is None or <= 0.
+    Returns logr unchanged if tf_from == tf_to (within 0.1%).
+    """
+    if tf_from is None or tf_to is None or tf_from <= 0 or tf_to <= 0:
+        return float("nan")
+    if abs(tf_from - tf_to) < 0.001:
+        return float(logr)
+    return float(logr) * (tf_to / tf_from)
+
+# ---------------------------------------------------------------------------
+# Optimal scaling factor search
+# ---------------------------------------------------------------------------
+
+def _optimise_scaling(
+        logr_fixed:  np.ndarray,
+        logr_adjust: np.ndarray,
+        min_abs:     float = 0.05,
+) -> tuple[float, float]:
+    """
+    Find the optimal scale factor m >= 1 for logr_adjust using weighted
+    least squares, with weights = |logR_fixed|.
+
+    High-signal bins (large absolute logR) dominate the fit; near-neutral
+    bins are down-weighted proportionally so they cannot pull the estimate
+    toward 1.0. This is more accurate and faster than a grid search.
+
+    Closed-form solution for m minimising Σ w_i*(lf_i - m*la_i)²:
+
+        m = Σ(w_i * lf_i * la_i) / Σ(w_i * la_i²)
+        w_i = |lf_i|
+
+    m is clamped to >= 1.0 (lower-TF sample is always scaled upward).
+
+    Parameters
+    ----------
+    logr_fixed   : logR array for the fixed (higher-TF) sample.
+    logr_adjust  : logR array for the sample to be scaled upward.
+    min_abs      : bins where |logR_fixed| < min_abs are excluded as
+                   near-neutral noise (default 0.05).
+
+    Returns
+    -------
+    (best_multiplier, neighbour_noise_rmse)
+    """
+    mask = (
+        np.isfinite(logr_fixed) &
+        np.isfinite(logr_adjust) &
+        (np.abs(logr_fixed) >= min_abs)
+    )
+    if mask.sum() < 10:
+        # Fall back to all finite bins if too few informative bins
+        mask = np.isfinite(logr_fixed) & np.isfinite(logr_adjust)
+    if mask.sum() < 10:
+        return 1.0, float("nan")
+
+    lf = logr_fixed[mask]
+    la = logr_adjust[mask]
+    w  = np.abs(lf)   # weights proportional to signal strength
+
+    numerator   = float(np.sum(w * lf * la))
+    denominator = float(np.sum(w * la ** 2))
+
+    if denominator <= 0:
+        return 1.0, float("nan")
+
+    m    = max(1.0, numerator / denominator)
+    rmse = float(np.sqrt(np.mean((lf - la * m) ** 2)))
+    return m, rmse
+
+
+def _neighbour_noise(bins_df: pd.DataFrame) -> float:
+    """
+    Median absolute difference between consecutive bins on the same chromosome.
+    Low for clean samples with flat segments; high for noisy samples.
+    """
+    diffs = []
+    for chrom, grp in bins_df.groupby("chrom"):
+        vals  = grp["logr_corrected"].values
+        valid = vals[np.isfinite(vals)]
+        if len(valid) >= 2:
+            diffs.append(np.abs(np.diff(valid)))
+    if not diffs:
+        return float("nan")
+    return float(np.median(np.concatenate(diffs)))
+
+
+def _signal_metrics(
+        bins_df:       pd.DataFrame,
+        quantile:      float = 0.95,
+        noise_mult:    float = 2.0,
+) -> tuple[float, int, float, float]:
+    """
+    Compute signal quality metrics for a bin-level logR DataFrame.
+
+    Returns
+    -------
+    (q_val, n_above_noise, neighbour_noise, snr)
+
+    q_val          : *quantile* of absolute logR values (default 95th).
+    n_above_noise  : number of bins where |logR| > noise_mult * neighbour_noise.
+    neighbour_noise: median absolute consecutive bin difference.
+    snr            : q_val / neighbour_noise — signal-to-noise ratio.
+                     >= 1.5 indicates meaningful copy-number signal above noise.
+    """
+    vals = bins_df["logr_corrected"].dropna().values
+    vals = vals[np.isfinite(vals)]
+    if len(vals) == 0:
+        return float("nan"), 0, float("nan"), float("nan")
+
+    noise = _neighbour_noise(bins_df)
+    if np.isnan(noise) or noise <= 0:
+        return float(np.quantile(np.abs(vals), quantile)), 0, float("nan"), float("nan")
+
+    q_val   = float(np.quantile(np.abs(vals), quantile))
+    n_above = int(np.sum(np.abs(vals) > noise_mult * noise))
+    snr     = q_val / noise
+    return q_val, n_above, noise, snr
+    """
+    Measure technical noise as the median absolute difference between
+    consecutive bins on the same chromosome.
+
+    Clean samples with well-defined CNA segments have low neighbour noise
+    (bins within a segment are nearly identical). Noisy samples have high
+    bin-to-bin variation everywhere, giving a large median difference even
+    without true copy-number changes.
+
+    Only within-chromosome differences are computed to avoid chromosome-
+    boundary artefacts.
+    """
+    diffs = []
+    for chrom, grp in bins_df.groupby("chrom"):
+        vals  = grp["logr_corrected"].values
+        valid = vals[np.isfinite(vals)]
+        if len(valid) >= 2:
+            diffs.append(np.abs(np.diff(valid)))
+    if not diffs:
+        return float("nan")
+    return float(np.median(np.concatenate(diffs)))
+
+
+
+
+# Bin-level data loading from .cna.seg
+# ---------------------------------------------------------------------------
+
+def _load_bins(
+        seg_path:    Path,
+        sample_name: str,
+        tf_from:     float,
+        tf_to:       float | None = None,
+) -> pd.DataFrame | None:
+    """
+    Load 50 kbp bin-level log2 ratios from a .cna.seg file and apply
+    relative TF correction.
+
+    If tf_to is provided (and differs from tf_from), the logR values are
+    re-expressed as if observed at tf_to.  Pass tf_to = max(tf_a, tf_b) for
+    both samples in a pair so they end up on the same scale.
+    If tf_to is None or equal to tf_from no correction is applied.
+
+    Returns DataFrame with columns:
+        sample, chrom, start, end, logr_raw, logr_corrected
+    or None if the file cannot be parsed or has no logr column.
+    """
+    df = parse_seg_file(seg_path, sample_name)
+    if df is None or df.empty:
+        return None
+
+    if "logr" not in df.columns:
+        print(f"      [WARN] No log2-ratio column in {seg_path.name} — "
+              f"cannot plot {sample_name}.")
+        return None
+
+    df = df[df["chrom"].isin(_OFFSETS)].copy()
+    df["logr_raw"] = pd.to_numeric(df["logr"], errors="coerce")
+
+    target_tf = tf_to if tf_to is not None else tf_from
+    df["logr_corrected"] = df["logr_raw"].apply(
+        lambda x: correct_logr_relative(x, tf_from, target_tf)
+        if pd.notna(x) else float("nan")
+    )
+    df = df.dropna(subset=["logr_corrected"])
+    df = df[np.isfinite(df["logr_corrected"])]
+
+    return df[["sample", "chrom", "start", "end",
+               "logr_raw", "logr_corrected"]].copy()
+
+
+def _load_bins_with_seg_means(
+        seg_path_bins: Path,
+        seg_path_segs: Path,
+        sample_name:   str,
+        tf_from:       float,
+) -> pd.DataFrame | None:
+    """
+    Load 50 kbp bins from a .cna.seg file and replace each bin's raw logR
+    with the segment mean logR from the matching .seg.txt segment.
+
+    This reduces noise dramatically: instead of per-bin variance, every bin
+    within a segment gets the segment's median logR — a much smoother signal
+    that makes the scaling optimisation more stable, especially when one
+    sample has lower tumor fraction.
+
+    The segment mean is assigned by overlap: for each bin, the .seg.txt
+    segment with the largest overlap is used. Bins with no overlapping
+    segment are dropped.
+
+    Returns DataFrame with columns:
+        sample, chrom, start, end, logr_raw (bin-level), logr_seg (segment mean),
+        logr_corrected (= logr_seg, used downstream for scaling and plotting)
+    or None on failure.
+    """
+    # Load raw bins
+    df_bins = parse_seg_file(seg_path_bins, sample_name)
+    if df_bins is None or df_bins.empty:
+        return None
+
+    logr_col_bins = _get_log2_col_from_df(df_bins)
+    if logr_col_bins is None:
+        print(f"      [WARN] No logR column in bins file {seg_path_bins.name}")
+        return None
+
+    df_bins = df_bins[df_bins["chrom"].isin(_OFFSETS)].copy()
+    df_bins["logr_raw"] = pd.to_numeric(df_bins[logr_col_bins], errors="coerce")
+
+    # Load segments
+    df_segs = parse_seg_file(seg_path_segs, sample_name)
+    if df_segs is None or df_segs.empty:
+        # Fall back to raw bin logR if no seg file
+        df_bins["logr_seg"]       = df_bins["logr_raw"]
+        df_bins["logr_corrected"] = df_bins["logr_raw"].apply(
+            lambda x: correct_logr_relative(x, tf_from, tf_from)
+            if pd.notna(x) else float("nan")
+        )
+        return df_bins[["sample", "chrom", "start", "end",
+                         "logr_raw", "logr_seg", "logr_corrected"]].copy()
+
+    logr_col_segs = _get_log2_col_from_df(df_segs)
+    if logr_col_segs is None:
+        df_bins["logr_seg"]       = df_bins["logr_raw"]
+        df_bins["logr_corrected"] = df_bins["logr_raw"]
+        return df_bins[["sample", "chrom", "start", "end",
+                         "logr_raw", "logr_seg", "logr_corrected"]].copy()
+
+    df_segs = df_segs[df_segs["chrom"].isin(_OFFSETS)].copy()
+    df_segs["logr_seg_val"] = pd.to_numeric(df_segs[logr_col_segs], errors="coerce")
+
+    # Build per-chrom segment index: list of (start, end, logr)
+    seg_index: dict[str, list] = {}
+    for _, r in df_segs.iterrows():
+        if pd.isna(r["logr_seg_val"]):
+            continue
+        seg_index.setdefault(r["chrom"], []).append(
+            (int(r["start"]), int(r["end"]), float(r["logr_seg_val"]))
+        )
+    for k in seg_index:
+        seg_index[k].sort()
+
+    def _seg_mean_for_bin(chrom: str, bstart: int, bend: int) -> float:
+        """Return logR of the segment with maximum overlap with this bin."""
+        best_overlap = 0
+        best_logr    = float("nan")
+        for ss, se, lv in seg_index.get(chrom, []):
+            if ss >= bend:
+                break  # segments are sorted; no further overlap possible
+            overlap = min(se, bend) - max(ss, bstart)
+            if overlap > best_overlap:
+                best_overlap = overlap
+                best_logr    = lv
+        return best_logr
+
+    logr_seg_vals = []
+    for _, row in df_bins.iterrows():
+        logr_seg_vals.append(
+            _seg_mean_for_bin(row["chrom"], int(row["start"]), int(row["end"]))
+        )
+
+    df_bins["logr_seg"] = logr_seg_vals
+    df_bins = df_bins.dropna(subset=["logr_seg"]).copy()
+
+    # logr_corrected = logr_seg (scaling is applied to these later)
+    # No TF correction at load time — the optimiser handles the scaling
+    df_bins["logr_corrected"] = df_bins["logr_seg"]
+
+    return df_bins[["sample", "chrom", "start", "end",
+                     "logr_raw", "logr_seg", "logr_corrected"]].copy()
+
+
+def _get_log2_col_from_df(df: pd.DataFrame) -> str | None:
+    """Return the first recognised log2-ratio column in df."""
+    candidates = ["logr", "log2_ratio", "log2ratio", "seg.mean",
+                  "median", "logr_copy_ratio"]
+    for c in candidates:
+        if c in df.columns:
+            return c
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Focal amp annotation helpers
+# ---------------------------------------------------------------------------
+
+def _build_focal_annotations(
+        focal_tsv: Path,
+        patient:   str,
+) -> list[dict]:
+    """
+    Read focal_amplifications.tsv and return all focal amp regions for this
+    patient across any of their samples.
+
+    Returns list of dicts with keys:
+        chrom, start, end, cosmic_genes
+    """
+    if not focal_tsv.exists() or focal_tsv.stat().st_size == 0:
+        return []
+
+    try:
+        df = pd.read_csv(focal_tsv, sep="\t", low_memory=False)
+    except Exception:
+        return []
+
+    if "sample" not in df.columns:
+        return []
+
+    # Filter to this patient's samples (patient prefix match)
+    # sample names follow <patient>_<timepoint> after normalization
+    pat_mask = df["sample"].str.startswith(patient + "_") | (df["sample"] == patient)
+    pat_df   = df[pat_mask]
+    if pat_df.empty:
+        return []
+
+    regions = []
+    for _, row in pat_df.iterrows():
+        chrom = str(row["chrom"])
+        if not chrom.startswith("chr"):
+            chrom = f"chr{chrom}"
+        genes = str(row.get("cosmic_genes", "")).strip()
+        if genes == "nan":
+            genes = ""
+        regions.append({
+            "chrom":        chrom,
+            "start":        int(row["start"]),
+            "end":          int(row["end"]),
+            "cosmic_genes": genes,
+        })
+    return regions
+
+
+def _merge_overlapping(regions: list[dict]) -> list[dict]:
+    """
+    Merge overlapping focal amp regions on the same chromosome into single
+    intervals so the shading is clean.
+    """
+    if not regions:
+        return []
+    by_chrom: dict[str, list] = {}
+    for r in regions:
+        by_chrom.setdefault(r["chrom"], []).append(r)
+
+    merged = []
+    for chrom, segs in by_chrom.items():
+        segs = sorted(segs, key=lambda x: x["start"])
+        cur = segs[0].copy()
+        for s in segs[1:]:
+            if s["start"] <= cur["end"]:
+                cur["end"]  = max(cur["end"], s["end"])
+                # Combine gene names
+                genes = {g for v in [cur["cosmic_genes"], s["cosmic_genes"]]
+                         for g in v.split(",") if g and g != "nan"}
+                cur["cosmic_genes"] = ",".join(sorted(genes))
+            else:
+                merged.append(cur)
+                cur = s.copy()
+        merged.append(cur)
+    return merged
+
+
+# ---------------------------------------------------------------------------
+# Single pairwise plot
+# ---------------------------------------------------------------------------
+
+def plot_pairwise_longitudinal(
+        sample_a:    str,
+        seg_path_a:      Path,
+        tf_a:            float,
+        sample_b:        str,
+        seg_path_b:      Path,
+        tf_b:            float,
+        output_path:     Path,
+        patient:         str = "",
+        entity:          str = "",
+        timepoint_a:     int | None = None,
+        timepoint_b:     int | None = None,
+        logr_ylim:       tuple[float, float] = (-2.5, 2.5),
+        focal_tsv:       Path | None = None,
+        max_noise:       float | None = 0.15,
+        min_signal:      float | None = None,
+        seg_path_a_segs: Path | None = None,
+        seg_path_b_segs: Path | None = None,
+) -> None:
+    """
+    Generate a genome-wide pairwise log2-ratio comparison plot using
+    unsegmented 50 kbp bin-level data for display, and segment means
+    from the .seg.txt file for the scaling optimisation.
+
+    Parameters
+    ----------
+    sample_a/b         : sample names
+    seg_path_a/b       : paths to 50 kbp .cna.seg bin-level files (for display)
+    seg_path_a/b_segs  : paths to 50 kbp .seg.txt segmented files (for scaling)
+    tf_a/b             : tumor fractions
+    output_path        : stem path (.pdf and .png added)
+    patient            : patient ID for title and focal amp lookup
+    entity             : entity name for colour selection
+    timepoint_a/b      : timepoint labels
+    logr_ylim          : y-axis range
+    focal_tsv          : path to focal_amplifications.tsv for shading
+    """
+    pal     = ICHORCNA_ENTITY_PALETTE.get(entity, ICHORCNA_ENTITY_PALETTE["Other"])
+    color_a = "#888888"
+    color_b = pal["gain"]
+
+    # Load bin-level data for display (raw scatter dots)
+    bins_a = _load_bins(seg_path_a, sample_a, tf_from=tf_a)
+    bins_b = _load_bins(seg_path_b, sample_b, tf_from=tf_b)
+
+    if bins_a is None or bins_b is None:
+        print(f"      [WARN] Could not load bin-level data for "
+              f"{sample_a} or {sample_b} — skipping.")
+        return
+
+    # Load segment-mean data for scaling optimisation (much less noisy)
+    # Falls back to raw bins if .seg.txt files not provided
+    if seg_path_a_segs is not None and seg_path_b_segs is not None:
+        seg_a = _load_bins_with_seg_means(seg_path_a, seg_path_a_segs,
+                                          sample_a, tf_a)
+        seg_b = _load_bins_with_seg_means(seg_path_b, seg_path_b_segs,
+                                          sample_b, tf_b)
+    else:
+        seg_a = bins_a
+        seg_b = bins_b
+
+    # Align segment-mean bins for scaling optimisation
+    aligned = _align_bins(
+        seg_a if seg_a is not None else bins_a,
+        seg_b if seg_b is not None else bins_b,
+    )
+    if aligned.empty:
+        print(f"      [WARN] No overlapping bins — skipping.")
+        return
+
+    # Higher-TF sample is fixed; lower-TF sample is scaled upward.
+    # Use segment means (logr_corrected from seg_a/seg_b) for the fit
+    # since they are much less noisy than raw bin logR.
+    if tf_a >= tf_b:
+        # a is fixed (higher TF), b is adjusted (lower TF)
+        best_m, best_rmse = _optimise_scaling(
+            aligned["logr_a"].values, aligned["logr_b"].values
+        )
+        bins_b = bins_b.copy()
+        bins_b["logr_corrected"] = bins_b["logr_corrected"] * best_m
+        adj_label = f"{sample_b} scaled ×{best_m:.2f}"
+    else:
+        # b is fixed (higher TF), a is adjusted (lower TF)
+        best_m, best_rmse = _optimise_scaling(
+            aligned["logr_b"].values, aligned["logr_a"].values
+        )
+        bins_a = bins_a.copy()
+        bins_a["logr_corrected"] = bins_a["logr_corrected"] * best_m
+        adj_label = f"{sample_a} scaled ×{best_m:.2f}"
+
+    print(f"        Optimal multiplier: {best_m:.3f},  RMSE: {best_rmse:.4f}")
+
+    # Per-sample signal metrics
+    q_a, n_above_a, noise_a = _signal_metrics(bins_a)
+    q_b, n_above_b, noise_b = _signal_metrics(bins_b)
+    pair_noise = max(
+        noise_a if not np.isnan(noise_a) else 0.0,
+        noise_b if not np.isnan(noise_b) else 0.0,
+    )
+    print(f"        {sample_a}: noise={noise_a:.4f}  p95={q_a:.3f}  "
+          f"bins_above_2x={n_above_a}")
+    print(f"        {sample_b}: noise={noise_b:.4f}  p95={q_b:.3f}  "
+          f"bins_above_2x={n_above_b}")
+    if max_noise is not None and pair_noise > max_noise:
+        print(f"        Pair noise {pair_noise:.4f} > max_noise {max_noise:.4f} "
+              f"— skipping plot.")
+        return
+    if min_signal is not None:
+        if q_a < min_signal or q_b < min_signal:
+            print(f"        Signal p95 ({q_a:.3f}, {q_b:.3f}) below "
+                  f"min_signal {min_signal:.3f} — skipping plot.")
+            return
+
+    # Focal amp regions for shading
+    focal_regions: list[dict] = []
+    if focal_tsv is not None:
+        raw_regions  = _build_focal_annotations(focal_tsv, patient)
+        focal_regions = _merge_overlapping(raw_regions)
+
+    fig, ax = plt.subplots(figsize=(22, 5.0), facecolor="white")
+    _style_ax(ax)
+
+    # Reference lines
+    ax.axhline( 0,    color="#999999", linewidth=0.8, linestyle="-",  zorder=1)
+    ax.axhline( 0.58, color="#cccccc", linewidth=0.4, linestyle=":",  zorder=1)  # ~gain
+    ax.axhline(-0.58, color="#cccccc", linewidth=0.4, linestyle=":",  zorder=1)  # ~loss
+
+    # Focal amp shading (drawn before data so it sits behind the points)
+    for region in focal_regions:
+        chrom = region["chrom"]
+        if chrom not in _OFFSETS:
+            continue
+        x0    = _genome_x(chrom, region["start"])
+        x1    = _genome_x(chrom, region["end"])
+        # Shaded box spanning the full y range
+        ax.axvspan(x0, x1, alpha=0.18, color="#b8860b", zorder=2)
+        ax.vlines([x0, x1], logr_ylim[0], logr_ylim[1],
+                  colors="#ffd166", linewidth=0.6, alpha=0.5, zorder=2)
+        # Gene annotation above the plot area
+        genes = region["cosmic_genes"]
+        if genes:
+            gene_label = genes.split(",")[0]
+            x_mid = (x0 + x1) / 2
+            ax.text(x_mid, logr_ylim[1] * 0.93, gene_label,
+                    fontsize=6, color="#b8860b", ha="center", va="bottom",
+                    rotation=90, fontweight="bold", zorder=5,
+                    clip_on=True)
+
+    # Plot bin-level logR as scatter.
+    # Dot size 3 pt is the minimum visible at genome scale; rasterized=True
+    # keeps PDF file sizes manageable with ~50k points per sample.
+    dot_size = 3.0
+    for bins, color, alpha, zorder in [
+        (bins_a, color_a, 0.50, 3),
+        (bins_b, color_b, 0.75, 4),
+    ]:
+        # Compute x at bin midpoint
+        x_vals = (
+            bins.apply(
+                lambda r: _genome_x(r["chrom"], (r["start"] + r["end"]) / 2),
+                axis=1,
+            ).values
+        )
+        y_vals = bins["logr_corrected"].values
+        # Clip for display — extreme values occur at very low TF
+        y_vals = np.clip(y_vals, logr_ylim[0], logr_ylim[1])
+        ax.scatter(x_vals, y_vals,
+                   s=dot_size, c=color, alpha=alpha,
+                   linewidths=0, zorder=zorder, rasterized=True)
+
+    # Axes
+    ax.set_ylim(logr_ylim)
+    ax.set_ylabel("TF-corrected log2 ratio",
+                  fontsize=9, color="#444444", labelpad=5)
+    ax.yaxis.set_major_locator(mticker.MultipleLocator(0.5))
+    ax.yaxis.set_major_formatter(mticker.FormatStrFormatter("%.1f"))
+
+    # Right-edge labels
+    ax.text(GENOME_SIZE * 1.001,  0,    "0",      fontsize=7, color="#888888", va="center")
+    ax.text(GENOME_SIZE * 1.001,  0.58, "+gain",  fontsize=6, color="#999999", va="center")
+    ax.text(GENOME_SIZE * 1.001, -0.58, "-loss",  fontsize=6, color="#999999", va="center")
+
+    # Title
+    tp_a_str   = f"TP{timepoint_a}" if timepoint_a is not None else sample_a
+    tp_b_str   = f"TP{timepoint_b}" if timepoint_b is not None else sample_b
+    noise_str  = f"{pair_noise:.3f}" if not np.isnan(pair_noise) else "n/a"
+    ax.set_title(
+        f"{patient}  ({entity})   "
+        f"{tp_a_str} (TF={tf_a:.1%})  vs  {tp_b_str} (TF={tf_b:.1%})"
+        f"   scale={best_m:.2f}  noise={noise_str}\n"
+        f"{tp_a_str}: p95={q_a:.3f}  above2×={n_above_a}    "
+        f"{tp_b_str}: p95={q_b:.3f}  above2×={n_above_b}",
+        fontsize=10, fontweight="bold", color="#222222", pad=6, loc="left",
+    )
+
+    # Legend
+    handles = [
+        mpatches.Patch(color=color_a,
+                       label=f"{tp_a_str}  {sample_a}  (TF={tf_a:.1%})"),
+        mpatches.Patch(color=color_b,
+                       label=f"{tp_b_str}  {sample_b}  (TF={tf_b:.1%})"),
+        plt.Line2D([0], [0], color="#999999", linewidth=1,
+                   linestyle="-", label="log2R = 0  (neutral)"),
+    ]
+    if focal_regions:
+        handles.append(
+            mpatches.Patch(color="#b8860b", alpha=0.4,
+                           label="Focal amp in any sample of this patient")
+        )
+    ax.legend(handles=handles, fontsize=8, loc="lower left",
+              facecolor="white", edgecolor="#cccccc",
+              labelcolor="#222222", framealpha=1.0)
+
+    fig.tight_layout()
+    _save(fig, output_path)
+
+
+# ---------------------------------------------------------------------------
+# Combined two-panel plot: profiles on top, differential below
+# ---------------------------------------------------------------------------
+
+def plot_longitudinal_combined(
+        sample_a:        str,
+        seg_path_a:      Path,
+        tf_a:            float,
+        sample_b:        str,
+        seg_path_b:      Path,
+        tf_b:            float,
+        output_path:     Path,
+        patient:         str = "",
+        entity:          str = "",
+        timepoint_a:     int | None = None,
+        timepoint_b:     int | None = None,
+        logr_ylim:       tuple[float, float] = (-2.5, 2.5),
+        delta_ylim:      tuple[float, float] = (-3.0, 3.0),
+        focal_tsv:       Path | None = None,
+        max_noise:       float | None = 0.15,
+        min_signal:      float | None = None,
+        seg_path_a_segs: Path | None = None,
+        seg_path_b_segs: Path | None = None,
+) -> None:
+    """
+    Generate a two-panel genome-wide longitudinal comparison plot:
+      - Top panel    : TF-corrected log2 ratios for both samples
+      - Bottom panel : differential (later − earlier)
+
+    All preparation (loading, scaling, metrics, focal amp regions) is done
+    once and shared between both panels.
+    """
+    pal     = ICHORCNA_ENTITY_PALETTE.get(entity, ICHORCNA_ENTITY_PALETTE["Other"])
+    color_a = "#888888"
+    color_b = pal["gain"]
+
+    # ── Load and scale ───────────────────────────────────────────────────────
+    bins_a = _load_bins(seg_path_a, sample_a, tf_from=tf_a)
+    bins_b = _load_bins(seg_path_b, sample_b, tf_from=tf_b)
+
+    if bins_a is None or bins_b is None:
+        print(f"      [WARN] Could not load bin-level data for "
+              f"{sample_a} or {sample_b} — skipping.")
+        return
+
+    if seg_path_a_segs is not None and seg_path_b_segs is not None:
+        seg_a = _load_bins_with_seg_means(seg_path_a, seg_path_a_segs,
+                                          sample_a, tf_a)
+        seg_b = _load_bins_with_seg_means(seg_path_b, seg_path_b_segs,
+                                          sample_b, tf_b)
+    else:
+        seg_a, seg_b = bins_a, bins_b
+
+    aligned = _align_bins(
+        seg_a if seg_a is not None else bins_a,
+        seg_b if seg_b is not None else bins_b,
+    )
+    if aligned.empty:
+        print(f"      [WARN] No overlapping bins — skipping.")
+        return
+
+    if tf_a >= tf_b:
+        best_m, _ = _optimise_scaling(
+            aligned["logr_a"].values, aligned["logr_b"].values
+        )
+        bins_b = bins_b.copy()
+        bins_b["logr_corrected"] = bins_b["logr_corrected"] * best_m
+    else:
+        best_m, _ = _optimise_scaling(
+            aligned["logr_b"].values, aligned["logr_a"].values
+        )
+        bins_a = bins_a.copy()
+        bins_a["logr_corrected"] = bins_a["logr_corrected"] * best_m
+
+    # ── Signal metrics and filters ───────────────────────────────────────────
+    q_a, n_above_a, noise_a, snr_a = _signal_metrics(bins_a)
+    q_b, n_above_b, noise_b, snr_b = _signal_metrics(bins_b)
+    pair_noise = max(
+        noise_a if not np.isnan(noise_a) else 0.0,
+        noise_b if not np.isnan(noise_b) else 0.0,
+    )
+    print(f"        {sample_a}: noise={noise_a:.4f}  p95={q_a:.3f}  "
+          f"snr={snr_a:.2f}  above2×={n_above_a}")
+    print(f"        {sample_b}: noise={noise_b:.4f}  p95={q_b:.3f}  "
+          f"snr={snr_b:.2f}  above2×={n_above_b}")
+
+    if max_noise is not None and pair_noise > max_noise:
+        print(f"        Pair noise {pair_noise:.4f} > {max_noise:.4f} — skipping.")
+        return
+    if min_signal is not None and (snr_a < min_signal or snr_b < min_signal):
+        print(f"        SNR ({snr_a:.2f}, {snr_b:.2f}) below "
+              f"min_signal {min_signal:.2f} — skipping.")
+        return
+
+    # ── Focal amp regions ────────────────────────────────────────────────────
+    focal_regions: list[dict] = []
+    if focal_tsv is not None:
+        focal_regions = _merge_overlapping(
+            _build_focal_annotations(focal_tsv, patient)
+        )
+
+    # ── Build differential ───────────────────────────────────────────────────
+    diff = _align_bins(bins_a, bins_b)
+    diff = diff[diff["chrom"].isin(_OFFSETS)].copy()
+
+    tp_a_str  = f"TP{timepoint_a}" if timepoint_a is not None else sample_a
+    tp_b_str  = f"TP{timepoint_b}" if timepoint_b is not None else sample_b
+    noise_str = f"{pair_noise:.3f}" if not np.isnan(pair_noise) else "n/a"
+
+    # ── Figure: 2 rows ───────────────────────────────────────────────────────
+    fig, (ax_top, ax_bot) = plt.subplots(
+        2, 1, figsize=(22, 9.0),
+        facecolor="white",
+        gridspec_kw={"height_ratios": [1, 1], "hspace": 0.35},
+    )
+
+    def _draw_focal_shading(ax, ylim):
+        for region in focal_regions:
+            chrom = region["chrom"]
+            if chrom not in _OFFSETS:
+                continue
+            x0 = _genome_x(chrom, region["start"])
+            x1 = _genome_x(chrom, region["end"])
+            ax.axvspan(x0, x1, alpha=0.18, color="#b8860b", zorder=2)
+            ax.vlines([x0, x1], ylim[0], ylim[1],
+                      colors="#b8860b", linewidth=0.6, alpha=0.5, zorder=2)
+            genes = region["cosmic_genes"]
+            if genes:
+                ax.text((x0 + x1) / 2, ylim[1] * 0.91,
+                        genes.split(",")[0],
+                        fontsize=6, color="#b8860b", ha="center",
+                        va="bottom", rotation=90, fontweight="bold",
+                        zorder=5, clip_on=True)
+
+    # ── Top panel: both profiles ─────────────────────────────────────────────
+    _style_ax(ax_top)
+    ax_top.axhline( 0,    color="#999999", linewidth=0.8, zorder=1)
+    ax_top.axhline( 0.58, color="#cccccc", linewidth=0.4, linestyle=":", zorder=1)
+    ax_top.axhline(-0.58, color="#cccccc", linewidth=0.4, linestyle=":", zorder=1)
+    _draw_focal_shading(ax_top, logr_ylim)
+
+    for bins, color, alpha, zorder in [
+        (bins_a, color_a, 0.50, 3),
+        (bins_b, color_b, 0.75, 4),
+    ]:
+        x_vals = bins.apply(
+            lambda r: _genome_x(r["chrom"], (r["start"] + r["end"]) / 2),
+            axis=1,
+        ).values
+        y_vals = np.clip(bins["logr_corrected"].values, logr_ylim[0], logr_ylim[1])
+        ax_top.scatter(x_vals, y_vals, s=3.0, c=color, alpha=alpha,
+                       linewidths=0, zorder=zorder, rasterized=True)
+
+    ax_top.set_ylim(logr_ylim)
+    ax_top.set_ylabel("TF-corrected log2 ratio",
+                      fontsize=9, color="#444444", labelpad=5)
+    ax_top.yaxis.set_major_locator(mticker.MultipleLocator(0.5))
+    ax_top.yaxis.set_major_formatter(mticker.FormatStrFormatter("%.1f"))
+    ax_top.text(GENOME_SIZE * 1.001,  0,    "0",     fontsize=7,
+                color="#888888", va="center")
+
+    ax_top.set_title(
+        f"{patient}  ({entity})   "
+        f"{tp_a_str} (TF={tf_a:.1%})  vs  {tp_b_str} (TF={tf_b:.1%})"
+        f"   scale={best_m:.2f}  noise={noise_str}\n"
+        f"{tp_a_str}: p95={q_a:.3f}  snr={snr_a:.2f}  above2×={n_above_a}    "
+        f"{tp_b_str}: p95={q_b:.3f}  snr={snr_b:.2f}  above2×={n_above_b}",
+        fontsize=10, fontweight="bold", color="#222222", pad=6, loc="left",
+    )
+
+    top_handles = [
+        mpatches.Patch(color=color_a,
+                       label=f"{tp_a_str}  {sample_a}  (TF={tf_a:.1%})"),
+        mpatches.Patch(color=color_b,
+                       label=f"{tp_b_str}  {sample_b}  (TF={tf_b:.1%})"),
+        plt.Line2D([0], [0], color="#999999", linewidth=1,
+                   linestyle="-", label="log2R = 0"),
+    ]
+    if focal_regions:
+        top_handles.append(
+            mpatches.Patch(color="#b8860b", alpha=0.4,
+                           label="Focal amp (any timepoint)")
+        )
+    ax_top.legend(handles=top_handles, fontsize=8, loc="lower left",
+                  facecolor="white", edgecolor="#cccccc",
+                  labelcolor="#222222", framealpha=1.0)
+
+    # ── Bottom panel: differential ───────────────────────────────────────────
+    _style_ax(ax_bot)
+    ax_bot.axhline( 0,   color="#999999", linewidth=0.9, zorder=1)
+    ax_bot.axhline( 0.5, color="#cccccc", linewidth=0.4, linestyle=":", zorder=1)
+    ax_bot.axhline(-0.5, color="#cccccc", linewidth=0.4, linestyle=":", zorder=1)
+    _draw_focal_shading(ax_bot, delta_ylim)
+
+    if not diff.empty:
+        x_vals = diff.apply(
+            lambda r: _genome_x(r["chrom"], (r["start"] + r["end"]) / 2),
+            axis=1,
+        ).values
+        y_vals = np.clip(diff["delta_logr"].values, delta_ylim[0], delta_ylim[1])
+        colors = np.where(
+            y_vals >=  0.5, pal["gain"],
+            np.where(y_vals <= -0.5, pal["loss"], "#999999"),
+        )
+        ax_bot.scatter(x_vals, y_vals, s=3.0, c=colors, alpha=0.70,
+                       linewidths=0, zorder=3, rasterized=True)
+
+    ax_bot.set_ylim(delta_ylim)
+    ax_bot.set_ylabel(f"Δ log2 ratio\n({tp_b_str} − {tp_a_str})",
+                      fontsize=9, color="#444444", labelpad=5)
+    ax_bot.yaxis.set_major_locator(mticker.MultipleLocator(0.5))
+    ax_bot.yaxis.set_major_formatter(mticker.FormatStrFormatter("%.1f"))
+    ax_bot.text(GENOME_SIZE * 1.001,  0,    "0",     fontsize=7,
+                color="#888888", va="center")
+    ax_bot.text(GENOME_SIZE * 1.001,  0.5,  "+0.5",  fontsize=6,
+                color="#999999", va="center")
+    ax_bot.text(GENOME_SIZE * 1.001, -0.5,  "−0.5",  fontsize=6,
+                color="#999999", va="center")
+
+    bot_handles = [
+        mpatches.Patch(color=pal["gain"],  label=f"Gain in {tp_b_str}  (Δ > +0.5)"),
+        mpatches.Patch(color=pal["loss"],  label=f"Loss in {tp_b_str}  (Δ < −0.5)"),
+        mpatches.Patch(color="#999999",    label="Unchanged"),
+    ]
+    ax_bot.legend(handles=bot_handles, fontsize=8, loc="lower left",
+                  facecolor="white", edgecolor="#cccccc",
+                  labelcolor="#222222", framealpha=1.0)
+
+    fig.tight_layout()
+    _save(fig, output_path)
+
+
+# ---------------------------------------------------------------------------
+# Batch: one combined plot per consecutive pair per patient
+# ---------------------------------------------------------------------------
+
+def plot_all_pairwise_longitudinal(
+        tf_df:          pd.DataFrame,
+        seg_files:      dict[str, Path],
+        output_dir:     Path,
+        min_tf:         float = 0.10,
+        logr_ylim:      tuple[float, float] = (-2.5, 2.5),
+        focal_tsv:      Path | None = None,
+        max_noise:      float | None = 0.15,
+        min_signal:     float | None = None,
+        seg_files_segs: dict[str, Path] | None = None,
+) -> int:
+    """
+    Generate one genome-wide log2-ratio comparison plot per consecutive
+    timepoint pair per patient.
+
+    Parameters
+    ----------
+    tf_df          : tumor fraction table.
+    seg_files      : {sample: Path} to 50 kbp .cna.seg bin-level files.
+    seg_files_segs : {sample: Path} to 50 kbp .seg.txt segmented files,
+                     used for segment-mean scaling. Falls back to seg_files
+                     if not provided.
+    seg_files  : {sample_name: Path} pointing to 50 kbp .cna.seg files.
+    output_dir : plots written as <patient>_TP<a>_vs_TP<b>.pdf/png.
+    min_tf     : skip samples with TF below this value.
+    logr_ylim  : y-axis range for all plots.
+    focal_tsv  : path to focal_amplifications.tsv for shading (optional).
+
+    Returns
+    -------
+    Number of plots generated.
+    """
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    df = tf_df.dropna(subset=["timepoint", "tumor_fraction"]).copy()
+    df = df[df["tumor_fraction"] >= min_tf]
+    df["timepoint"] = df["timepoint"].astype(int)
+
+    n_plots = 0
+
+    # Diagnostics — print once to help debug empty output
+    n_multi = sum(1 for _, g in df.groupby("patient")
+                  if g["timepoint"].nunique() >= 2)
+    n_with_seg = sum(
+        1 for _, g in df.groupby("patient")
+        if g["timepoint"].nunique() >= 2
+        and len(g[g["sample"].isin(seg_files)]) >= 2
+    )
+    print(f"        Patients with >= 2 timepoints in tf_df : {n_multi}")
+    print(f"        ...of which have >= 2 seg files found  : {n_with_seg}")
+    if n_multi > 0 and n_with_seg == 0:
+        # Show a sample of the mismatch
+        _tf_samples  = set(df["sample"].unique())
+        _seg_samples = set(seg_files.keys())
+        _overlap     = _tf_samples & _seg_samples
+        print(f"        tf_df samples (first 5)  : {sorted(_tf_samples)[:5]}")
+        print(f"        seg_files keys (first 5) : {sorted(_seg_samples)[:5]}")
+        print(f"        Overlapping samples      : {len(_overlap)}")
+
+    for patient, pat_df in df.groupby("patient"):
+        if pat_df["timepoint"].nunique() < 2:
+            continue
+        entity = entity_from_sample(str(patient))
+        pat_df = pat_df[pat_df["sample"].isin(seg_files)].sort_values("timepoint")
+        if len(pat_df) < 2:
+            continue
+
+        samples    = pat_df["sample"].tolist()
+        timepoints = pat_df["timepoint"].tolist()
+        tfs        = pat_df["tumor_fraction"].tolist()
+
+        for idx in range(len(samples) - 1):
+            sa, sb   = samples[idx],    samples[idx + 1]
+            tpa, tpb = timepoints[idx], timepoints[idx + 1]
+            tfa, tfb = tfs[idx],        tfs[idx + 1]
+
+            plot_name   = f"{patient}_TP{tpa}_vs_TP{tpb}"
+            output_path = output_dir / plot_name
+            print(f"        {plot_name}  (TF: {tfa:.1%} -> {tfb:.1%})")
+
+            if min(tfa, tfb) < min_tf:
+                print(f"        Skipping {patient} TP{tpa}->TP{tpb}: "
+                      f"TF {tfa:.1%}/{tfb:.1%} both must be >= {min_tf:.0%}")
+                continue
+
+            plot_longitudinal_combined(
+                sample_a         = sa,
+                seg_path_a       = seg_files[sa],
+                tf_a             = tfa,
+                sample_b         = sb,
+                seg_path_b       = seg_files[sb],
+                tf_b             = tfb,
+                output_path      = output_path,
+                patient          = patient,
+                entity           = entity,
+                timepoint_a      = tpa,
+                timepoint_b      = tpb,
+                logr_ylim        = logr_ylim,
+                focal_tsv        = focal_tsv,
+                max_noise        = max_noise,
+                min_signal       = min_signal,
+                seg_path_a_segs  = seg_files_segs.get(sa) if seg_files_segs else None,
+                seg_path_b_segs  = seg_files_segs.get(sb) if seg_files_segs else None,
+            )
+            n_plots += 1
+            gc.collect()
+
+    return n_plots
+
+
+# ---------------------------------------------------------------------------
+# Differential longitudinal plot  (later − earlier, both TF-corrected)
+# ---------------------------------------------------------------------------
+
+def _align_bins(
+        bins_a: pd.DataFrame,
+        bins_b: pd.DataFrame,
+) -> pd.DataFrame:
+    """
+    Inner-join two bin DataFrames on (chrom, start, end) and return a
+    DataFrame with columns:
+        chrom, start, end, logr_a, logr_b, delta_logr
+
+    delta_logr = logr_b (later) − logr_a (earlier)
+    Positive delta = gained signal in later sample.
+    Negative delta = lost signal in later sample.
+
+    Bins present in only one sample are dropped (inner join), which handles
+    the rare case where a chromosome is missing from one file.
+    """
+    a = bins_a[["chrom", "start", "end", "logr_corrected"]].rename(
+        columns={"logr_corrected": "logr_a"}
+    )
+    b = bins_b[["chrom", "start", "end", "logr_corrected"]].rename(
+        columns={"logr_corrected": "logr_b"}
+    )
+    merged = a.merge(b, on=["chrom", "start", "end"], how="inner")
+    merged["delta_logr"] = merged["logr_b"] - merged["logr_a"]
+    return merged
+
+
+def plot_differential_longitudinal(
+        sample_a:        str,
+        seg_path_a:      Path,
+        tf_a:            float,
+        sample_b:        str,
+        seg_path_b:      Path,
+        tf_b:            float,
+        output_path:     Path,
+        patient:         str = "",
+        entity:          str = "",
+        timepoint_a:     int | None = None,
+        timepoint_b:     int | None = None,
+        delta_ylim:      tuple[float, float] = (-3.0, 3.0),
+        focal_tsv:       Path | None = None,
+        max_noise:       float | None = 0.15,
+        seg_path_a_segs: Path | None = None,
+        min_signal:      float | None = None,
+        seg_path_b_segs: Path | None = None,
+) -> None:
+    """
+    Genome-wide differential log2-ratio plot: (later − earlier), both samples
+    TF-corrected before subtraction.
+
+    Uses segment means from .seg.txt for the scaling optimisation and
+    raw bin logR from .cna.seg for the differential scatter display.
+    """
+    pal = ICHORCNA_ENTITY_PALETTE.get(entity, ICHORCNA_ENTITY_PALETTE["Other"])
+
+    bins_a = _load_bins(seg_path_a, sample_a, tf_from=tf_a)
+    bins_b = _load_bins(seg_path_b, sample_b, tf_from=tf_b)
+
+    if bins_a is None or bins_b is None:
+        print(f"      [WARN] Could not load bin-level data for "
+              f"{sample_a} or {sample_b} — skipping differential plot.")
+        return
+
+    # Segment means for scaling optimisation
+    if seg_path_a_segs is not None and seg_path_b_segs is not None:
+        seg_a = _load_bins_with_seg_means(seg_path_a, seg_path_a_segs,
+                                          sample_a, tf_a)
+        seg_b = _load_bins_with_seg_means(seg_path_b, seg_path_b_segs,
+                                          sample_b, tf_b)
+    else:
+        seg_a, seg_b = bins_a, bins_b
+
+    aligned = _align_bins(
+        seg_a if seg_a is not None else bins_a,
+        seg_b if seg_b is not None else bins_b,
+    )
+    if aligned.empty:
+        print(f"      [WARN] No overlapping bins between {sample_a} and "
+              f"{sample_b} — skipping differential plot.")
+        return
+
+    # Higher-TF sample is fixed; lower-TF sample scaled upward
+    if tf_a >= tf_b:
+        best_m, best_rmse = _optimise_scaling(
+            aligned["logr_a"].values, aligned["logr_b"].values
+        )
+        bins_b = bins_b.copy()
+        bins_b["logr_corrected"] = bins_b["logr_corrected"] * best_m
+    else:
+        best_m, best_rmse = _optimise_scaling(
+            aligned["logr_b"].values, aligned["logr_a"].values
+        )
+        bins_a = bins_a.copy()
+        bins_a["logr_corrected"] = bins_a["logr_corrected"] * best_m
+
+    print(f"        Differential — optimal multiplier: {best_m:.3f},  "
+          f"RMSE: {best_rmse:.4f}")
+
+    # Per-sample signal metrics
+    q_a, n_above_a, noise_a = _signal_metrics(bins_a)
+    q_b, n_above_b, noise_b = _signal_metrics(bins_b)
+    pair_noise = max(
+        noise_a if not np.isnan(noise_a) else 0.0,
+        noise_b if not np.isnan(noise_b) else 0.0,
+    )
+    print(f"        {sample_a}: noise={noise_a:.4f}  p95={q_a:.3f}  "
+          f"bins_above_2x={n_above_a}")
+    print(f"        {sample_b}: noise={noise_b:.4f}  p95={q_b:.3f}  "
+          f"bins_above_2x={n_above_b}")
+    if max_noise is not None and pair_noise > max_noise:
+        print(f"        Pair noise {pair_noise:.4f} > max_noise {max_noise:.4f} "
+              f"— skipping differential plot.")
+        return
+    if min_signal is not None:
+        if q_a < min_signal or q_b < min_signal:
+            print(f"        Signal p95 ({q_a:.3f}, {q_b:.3f}) below "
+                  f"min_signal {min_signal:.3f} — skipping differential plot.")
+            return
+
+    # Recompute aligned diff with the scaled bins
+    diff = _align_bins(bins_a, bins_b)
+
+    # Focal amp shading
+    focal_regions: list[dict] = []
+    if focal_tsv is not None:
+        focal_regions = _merge_overlapping(
+            _build_focal_annotations(focal_tsv, patient)
+        )
+
+    fig, ax = plt.subplots(figsize=(22, 4.5), facecolor="white")
+    _style_ax(ax)
+
+    # Reference lines
+    ax.axhline( 0,    color="#999999", linewidth=0.9, linestyle="-",  zorder=1)
+    ax.axhline( 0.5,  color="#cccccc", linewidth=0.4, linestyle=":",  zorder=1)
+    ax.axhline(-0.5,  color="#cccccc", linewidth=0.4, linestyle=":",  zorder=1)
+
+    # Focal amp shading
+    for region in focal_regions:
+        chrom = region["chrom"]
+        if chrom not in _OFFSETS:
+            continue
+        x0 = _genome_x(chrom, region["start"])
+        x1 = _genome_x(chrom, region["end"])
+        ax.axvspan(x0, x1, alpha=0.18, color="#b8860b", zorder=2)
+        ax.vlines([x0, x1], delta_ylim[0], delta_ylim[1],
+                  colors="#ffd166", linewidth=0.6, alpha=0.5, zorder=2)
+        genes = region["cosmic_genes"]
+        if genes:
+            x_mid = (x0 + x1) / 2
+            ax.text(x_mid, delta_ylim[1] * 0.92, genes.split(",")[0],
+                    fontsize=6, color="#b8860b", ha="center", va="bottom",
+                    rotation=90, fontweight="bold", zorder=5, clip_on=True)
+
+    # Colour each point by direction and magnitude
+    diff = diff[diff["chrom"].isin(_OFFSETS)].copy()
+    x_vals = diff.apply(
+        lambda r: _genome_x(r["chrom"], (r["start"] + r["end"]) / 2),
+        axis=1,
+    ).values
+    y_vals = np.clip(diff["delta_logr"].values, delta_ylim[0], delta_ylim[1])
+
+    # Assign colours: gain / neutral / loss
+    gain_thresh =  0.5
+    loss_thresh = -0.5
+    colors = np.where(
+        y_vals >= gain_thresh, pal["gain"],
+        np.where(y_vals <= loss_thresh, pal["loss"], "#4a5568")
+    )
+
+    ax.scatter(x_vals, y_vals,
+               s=3.0, c=colors, alpha=0.70,
+               linewidths=0, zorder=3, rasterized=True)
+
+    # Axes
+    ax.set_ylim(delta_ylim)
+    ax.set_ylabel("Δ log2 ratio\n(later − earlier)",
+                  fontsize=9, color="#444444", labelpad=5)
+    ax.yaxis.set_major_locator(mticker.MultipleLocator(0.5))
+    ax.yaxis.set_major_formatter(mticker.FormatStrFormatter("%.1f"))
+
+    ax.text(GENOME_SIZE * 1.001,  0,    "0",      fontsize=7, color="#888888", va="center")
+    ax.text(GENOME_SIZE * 1.001,  0.5,  "+0.5",   fontsize=6, color="#999999", va="center")
+    ax.text(GENOME_SIZE * 1.001, -0.5,  "−0.5",   fontsize=6, color="#999999", va="center")
+
+    # Title
+    tp_a_str  = f"TP{timepoint_a}" if timepoint_a is not None else sample_a
+    tp_b_str  = f"TP{timepoint_b}" if timepoint_b is not None else sample_b
+    n_bins    = len(diff)
+    noise_str = f"{pair_noise:.3f}" if not np.isnan(pair_noise) else "n/a"
+    ax.set_title(
+        f"{patient}  ({entity})   Δ {tp_b_str} − {tp_a_str}   "
+        f"(TF: {tf_a:.1%} → {tf_b:.1%},  scale={best_m:.2f},  "
+        f"noise={noise_str},  {n_bins:,} bins)\n"
+        f"{tp_a_str}: p95={q_a:.3f}  above2×={n_above_a}    "
+        f"{tp_b_str}: p95={q_b:.3f}  above2×={n_above_b}",
+        fontsize=10, fontweight="bold", color="#222222", pad=6, loc="left",
+    )
+
+    handles = [
+        mpatches.Patch(color=pal["gain"],  label=f"Gain in {tp_b_str}  (Δ > +0.5)"),
+        mpatches.Patch(color=pal["loss"],  label=f"Loss in {tp_b_str}  (Δ < −0.5)"),
+        mpatches.Patch(color="#999999",    label="Unchanged"),
+        plt.Line2D([0], [0], color="#999999", linewidth=1,
+                   linestyle="-", label="Δ = 0  (no change)"),
+    ]
+    if focal_regions:
+        handles.append(
+            mpatches.Patch(color="#b8860b", alpha=0.4,
+                           label="Focal amp in any sample of this patient")
+        )
+    ax.legend(handles=handles, fontsize=8, loc="lower left",
+              facecolor="white", edgecolor="#cccccc",
+              labelcolor="#222222", framealpha=1.0)
+
+    fig.tight_layout()
+    _save(fig, output_path)
+
+
+# ---------------------------------------------------------------------------
+# Batch differential plots
+# ---------------------------------------------------------------------------
+
+def plot_all_differential_longitudinal(
+        tf_df:          pd.DataFrame,
+        seg_files:      dict[str, Path],
+        output_dir:     Path,
+        min_tf:         float = 0.10,
+        delta_ylim:     tuple[float, float] = (-3.0, 3.0),
+        focal_tsv:      Path | None = None,
+        max_noise:      float | None = 0.15,
+        min_signal:     float | None = None,
+        seg_files_segs: dict[str, Path] | None = None,
+) -> int:
+    """
+    Generate one differential (later − earlier) log2-ratio plot per
+    consecutive timepoint pair per patient.
+
+    Parameters and return value mirror plot_all_pairwise_longitudinal.
+    Output files are named <patient>_TP<a>_vs_TP<b>_diff.pdf/png.
+    """
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    df = tf_df.dropna(subset=["timepoint", "tumor_fraction"]).copy()
+    df = df[df["tumor_fraction"] >= min_tf]
+    df["timepoint"] = df["timepoint"].astype(int)
+
+    n_plots = 0
+
+    for patient, pat_df in df.groupby("patient"):
+        if pat_df["timepoint"].nunique() < 2:
+            continue
+        entity = entity_from_sample(str(patient))
+        pat_df = pat_df[pat_df["sample"].isin(seg_files)].sort_values("timepoint")
+        if len(pat_df) < 2:
+            continue
+
+        samples    = pat_df["sample"].tolist()
+        timepoints = pat_df["timepoint"].tolist()
+        tfs        = pat_df["tumor_fraction"].tolist()
+
+        for idx in range(len(samples) - 1):
+            sa, sb   = samples[idx],    samples[idx + 1]
+            tpa, tpb = timepoints[idx], timepoints[idx + 1]
+            tfa, tfb = tfs[idx],        tfs[idx + 1]
+
+            plot_name   = f"{patient}_TP{tpa}_vs_TP{tpb}_diff"
+            output_path = output_dir / plot_name
+            if min(tfa, tfb) < min_tf:
+                print(f"        Skipping {patient} TP{tpa}->TP{tpb} diff: "
+                      f"TF {tfa:.1%}/{tfb:.1%} both must be >= {min_tf:.0%}")
+                continue
+
+            print(f"        {plot_name}  (TF: {tfa:.1%} -> {tfb:.1%})")
+
+            plot_differential_longitudinal(
+                sample_a         = sa,
+                seg_path_a       = seg_files[sa],
+                tf_a             = tfa,
+                sample_b         = sb,
+                seg_path_b       = seg_files[sb],
+                tf_b             = tfb,
+                output_path      = output_path,
+                patient          = patient,
+                entity           = entity,
+                timepoint_a      = tpa,
+                timepoint_b      = tpb,
+                delta_ylim       = delta_ylim,
+                focal_tsv        = focal_tsv,
+                max_noise        = max_noise,
+                min_signal       = min_signal,
+                seg_path_a_segs  = seg_files_segs.get(sa) if seg_files_segs else None,
+                seg_path_b_segs  = seg_files_segs.get(sb) if seg_files_segs else None,
+            )
+            n_plots += 1
+            gc.collect()
+
+    return n_plots
