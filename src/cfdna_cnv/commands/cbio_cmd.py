@@ -134,9 +134,22 @@ def run(args: argparse.Namespace) -> None:
           f"delta >= {args.focal_log2_delta} vs "
           f"{args.focal_flank_bp//1_000_000} Mbp background)")
 
-    all_focal_frames: list[pd.DataFrame] = []
+    import tempfile, shutil
+    tmp_dir  = Path(tempfile.mkdtemp(prefix='cbio_focal_'))
+    tmp_path = tmp_dir / 'focal_amp_events.tsv'
+    header_written = False
+
+    # Build a minimal tf_df compatible with aggregate_focal_frequencies
+    tf_rows = []
     for entity, seg_df in seg_by_entity.items():
-        n_patients = seg_df["patient"].nunique()
+        for pat in seg_df['patient'].unique():
+            tf_rows.append({'sample': pat, 'patient': pat,
+                            'tumor_fraction': float('nan'), 'entity': entity})
+    cbio_tf_df = pd.DataFrame(tf_rows).drop_duplicates(subset=['patient'])
+    all_patients = cbio_tf_df['patient'].tolist()
+
+    for entity, seg_df in seg_by_entity.items():
+        n_patients = seg_df['patient'].nunique()
         print(f"      [{entity}] {n_patients} patients …")
 
         focal = detect_focal_amps_cbio(
@@ -150,29 +163,52 @@ def run(args: argparse.Namespace) -> None:
         print(f"        Found {len(focal)} focal amp segments in "
               f"{focal['patient'].nunique() if not focal.empty else 0} patients.")
 
+        if focal.empty:
+            continue
+
         focal = annotate_with_cgc(focal, cgc_df)
 
-        focal_out = outdir / f"{entity}_focal_amplifications.tsv"
-        focal.to_csv(focal_out, sep="\t", index=False)
-        print(f"        Written: {focal_out}")
+        # Write per-entity TSV for reference
+        focal.to_csv(outdir / f'{entity}_focal_amplifications.tsv',
+                     sep='\t', index=False)
 
-        focal_freq = compute_focal_amp_frequencies(focal, n_patients, entity)
-        if not focal_freq.empty:
-            all_focal_frames.append(focal_freq)
-            plot_focal_amp_frequencies(
-                focal_freq, entity,
-                outdir / f"focal_amp_plot_{entity}",
-                min_freq=args.focal_min_freq,
-            )
+        # Map to ichorCNA streaming TSV schema for shared aggregation
+        focal_out = focal.copy()
+        focal_out['sample'] = focal_out['patient']
+        if 'seg_mean' in focal_out.columns:
+            focal_out = focal_out.rename(columns={'seg_mean': 'logr'})
+        if 'copy_number' in focal_out.columns:
+            focal_out = focal_out.rename(columns={'copy_number': 'copy.number'})
+        focal_out.to_csv(
+            tmp_path, sep='\t', index=False,
+            mode='a' if header_written else 'w',
+            header=not header_written,
+        )
+        header_written = True
 
-    if all_focal_frames:
-        combined_focal = pd.concat(all_focal_frames, ignore_index=True)
-        freq_out = outdir / "focal_amp_frequencies.tsv"
-        combined_focal.to_csv(freq_out, sep="\t", index=False)
-        print(f"      Written: {freq_out}")
+    # Aggregate using shared ichorCNA function (bin coverage + merging)
+    freq_focal = aggregate_focal_frequencies(
+        tmp_path, all_patients, tf_df=cbio_tf_df
+    )
+    shutil.rmtree(tmp_dir, ignore_errors=True)
+
+    if not freq_focal.empty:
+        freq_out = outdir / 'focal_amp_frequencies.tsv'
+        freq_focal.to_csv(freq_out, sep='\t', index=False)
+        print(f"      Written: {freq_out}  ({len(freq_focal)} regions)")
+
+        # Build a tf_tsv for the plot function
+        tf_tsv = outdir / 'cbio_tf_summary.tsv'
+        cbio_tf_df.to_csv(tf_tsv, sep='\t', index=False)
+        plot_focal_amp_ichorcna(
+            focal_freq_tsv = freq_out,
+            tf_tsv         = tf_tsv,
+            output_path    = outdir / 'focal_amp_frequencies_plot',
+            min_freq       = getattr(args, 'focal_min_freq', 0.0),
+        )
     else:
-        combined_focal = pd.DataFrame()
-        print("      No focal amplifications detected.")
+        print('      No focal amplifications detected.')
+
 
     # ── Summary ───────────────────────────────────────────────────────────────
     print("\n" + "=" * 65)
