@@ -356,45 +356,43 @@ def aggregate_focal_frequencies(
         tf_df:           "pd.DataFrame | None" = None,
 ) -> pd.DataFrame:
     """
-    Compute per-50-kbp-bin focal amplification frequencies at the patient level.
+    Compute per-50-kbp-bin focal amplification frequencies at the patient level,
+    then merge consecutive bins with identical patient sets into regions.
 
-    For each 50 kbp genomic bin, count how many patients have at least one
-    focal amp segment that overlaps that bin.  Overlapping events from the
-    same patient are deduplicated (counted once per bin per patient).
-    Events from different patients that partially overlap are counted
-    separately — so a bin covered by 3 patients gets frequency 3/N even
-    if the underlying segments have different boundaries.
+    Post-processing
+    ---------------
+    Adjacent 50 kbp bins on the same chromosome with the same patient set are
+    merged into a single region row.  This collapses flat plateaus in the
+    frequency track into one row per contiguous focal amp region, making the
+    table much more readable and directly showing each MCR as one entry.
 
-    This approach:
-      - Reveals the minimal common region (MCR): the bin with the highest
-        frequency identifies where the most samples overlap.
-      - Handles partially overlapping focal amps correctly.
-      - Aggregates COSMIC annotation across all events overlapping each bin.
-
-    Patient-level deduplication
-    ---------------------------
-    When tf_df is provided, only the highest-TF sample per patient is used.
-    Otherwise every sample in high_tf_samples contributes independently.
+    Per-entity frequencies
+    ----------------------
+    When tf_df contains an 'entity' column (or one can be derived from patient
+    IDs via entity_from_sample), per-entity n_patients and frequency columns
+    are added: n_patients_<Entity> and freq_<Entity>.
 
     Parameters
     ----------
     focal_tmp_path  : path to the streaming focal amp TSV.
     high_tf_samples : full list of high-TF samples (denominator).
-    tf_df           : tumor fraction table (sample, patient, tumor_fraction).
-                      Used to pick the representative sample per patient and
-                      to count unique patients as the denominator.
+    tf_df           : tumor fraction table (sample, patient, tumor_fraction,
+                      optionally entity).
 
     Returns
     -------
-    DataFrame with one row per 50 kbp bin that has at least one patient,
-    columns: chrom, bin_start, bin_end, n_patients, n_total_patients,
-             frequency, mean_cn, max_cn, patients, cosmic_genes, …
-    Sorted by frequency descending.
+    DataFrame with one row per merged focal amp region, sorted by chromosome
+    then start position. Columns: chrom, bin_start, bin_end, n_bins,
+    n_patients, n_total_patients, frequency, [n_patients_X, freq_X per entity],
+    mean_cn, max_cn, patients, cosmic_genes, …
     """
     if not focal_tmp_path.exists() or focal_tmp_path.stat().st_size == 0:
         return pd.DataFrame()
 
-    # Build patient → representative sample mapping
+    from ..common.constants import CHROM_ORDER
+    from ..ichorcna.plots import entity_from_sample
+
+    # Build patient/entity mappings
     high_tf_set = set(high_tf_samples)
     if tf_df is not None and not tf_df.empty:
         _tf = tf_df[tf_df["sample"].isin(high_tf_set)].copy()
@@ -403,44 +401,49 @@ def aggregate_focal_frequencies(
                .drop_duplicates(subset=["patient"], keep="first")
                ["sample"]
         )
-        sample_to_patient: dict[str, str] = dict(
-            zip(_tf["sample"], _tf["patient"])
-        )
+        sample_to_patient: dict[str, str] = dict(zip(_tf["sample"], _tf["patient"]))
         n_total_patients = _tf["patient"].nunique()
-    else:
-        # No tf_df — treat each sample as its own patient
-        rep_samples = high_tf_set
-        sample_to_patient = {s: s for s in high_tf_set}
-        n_total_patients = len(high_tf_set)
 
-    # bin key = (chrom, bin_start)
-    # value   = set of patient IDs with a focal amp overlapping this bin
-    bin_patients: dict[tuple, set]   = {}
-    bin_cn_vals:  dict[tuple, list]  = {}
-    bin_cosmic:   dict[tuple, dict]  = {}
+        # Build patient → entity and entity → patient set
+        if "entity" in _tf.columns:
+            patient_entity: dict[str, str] = dict(zip(_tf["patient"], _tf["entity"]))
+        else:
+            patient_entity = {p: entity_from_sample(str(p))
+                              for p in _tf["patient"].unique()}
+        entity_all_patients: dict[str, set] = {}
+        for pat, ent in patient_entity.items():
+            entity_all_patients.setdefault(ent, set()).add(pat)
+    else:
+        rep_samples         = high_tf_set
+        sample_to_patient   = {s: s for s in high_tf_set}
+        n_total_patients    = len(high_tf_set)
+        patient_entity      = {}
+        entity_all_patients = {}
+
+    all_entities = sorted(entity_all_patients.keys())
+
+    # Accumulate per-bin data
+    bin_patients: dict[tuple, set]  = {}
+    bin_cn_vals:  dict[tuple, list] = {}
+    bin_cosmic:   dict[tuple, dict] = {}
 
     for chunk in pd.read_csv(focal_tmp_path, sep="\t",
                              chunksize=50_000, low_memory=False):
         for _, row in chunk.iterrows():
             sample = str(row["sample"])
             if sample not in rep_samples:
-                continue   # skip non-representative samples
-
+                continue
             patient   = sample_to_patient.get(sample, sample)
             chrom     = str(row["chrom"])
             seg_start = int(row["start"])
             seg_end   = int(row["end"])
-
-            # All 50 kbp bins overlapping this segment
             first_bin = (seg_start // _BIN_SIZE) * _BIN_SIZE
             last_bin  = ((seg_end - 1) // _BIN_SIZE) * _BIN_SIZE
-
             cn = row.get("copy.number", float("nan"))
             try:
                 cn = float(cn)
             except (ValueError, TypeError):
                 cn = float("nan")
-
             b = first_bin
             while b <= last_bin:
                 key = (chrom, b)
@@ -460,36 +463,83 @@ def aggregate_focal_frequencies(
     if not bin_patients:
         return pd.DataFrame()
 
-    # Sort bins in chromosome order
-    from ..common.constants import CHROM_ORDER
+    # Sort bins in genomic order
     chrom_rank = {c: i for i, c in enumerate(CHROM_ORDER)}
+    sorted_keys = sorted(bin_patients,
+                         key=lambda k: (chrom_rank.get(k[0], 99), k[1]))
 
-    rows = []
-    for key in sorted(bin_patients,
-                      key=lambda k: (chrom_rank.get(k[0], 99), k[1])):
-        chrom, bin_start = key
-        n_pat  = len(bin_patients[key])
-        cn_list = bin_cn_vals.get(key, [])
+    # ── Merge consecutive bins with identical patient sets ───────────────────
+    merged_rows = []
+    cur_chrom     = None
+    cur_start     = None
+    cur_end       = None
+    cur_patients  = None
+    cur_cn_vals   = []
+    cur_cosmic    = {c: set() for c in _COSMIC_COLS}
+    cur_n_bins    = 0
+
+    def _flush(chrom, start, end, patients, cn_vals, cosmic, n_bins):
+        n_pat   = len(patients)
+        cn_list = cn_vals
         row_out = {
-            "chrom":             chrom,
-            "bin_start":         bin_start,
-            "bin_end":           bin_start + _BIN_SIZE,
-            "n_patients":        n_pat,
-            "n_total_patients":  n_total_patients,
-            "frequency":         n_pat / n_total_patients,
-            "mean_cn":           float(np.mean(cn_list)) if cn_list else float("nan"),
-            "max_cn":            float(np.max(cn_list))  if cn_list else float("nan"),
-            "patients":          ",".join(sorted(bin_patients[key])),
+            "chrom":            chrom,
+            "bin_start":        start,
+            "bin_end":          end,
+            "n_bins":           n_bins,
+            "n_patients":       n_pat,
+            "n_total_patients": n_total_patients,
+            "frequency":        n_pat / n_total_patients if n_total_patients else 0,
+            "mean_cn":          float(np.mean(cn_list)) if cn_list else float("nan"),
+            "max_cn":           float(np.max(cn_list))  if cn_list else float("nan"),
+            "patients":         ",".join(sorted(patients)),
         }
+        # Per-entity frequencies
+        for ent in all_entities:
+            ent_total = len(entity_all_patients.get(ent, set()))
+            ent_n     = sum(1 for p in patients
+                            if patient_entity.get(p) == ent)
+            row_out[f"n_patients_{ent}"] = ent_n
+            row_out[f"freq_{ent}"]       = (ent_n / ent_total
+                                             if ent_total > 0 else 0.0)
         for c in _COSMIC_COLS:
-            row_out[c] = ",".join(sorted(bin_cosmic.get(key, {}).get(c, set())))
-        rows.append(row_out)
+            row_out[c] = ",".join(sorted(cosmic.get(c, set())))
+        merged_rows.append(row_out)
 
-    return (pd.DataFrame(rows)
-            .sort_values("frequency", ascending=False)
-            .reset_index(drop=True))
+    for key in sorted_keys:
+        chrom, b_start = key
+        b_end      = b_start + _BIN_SIZE
+        patients   = bin_patients[key]
+        cn_vals    = bin_cn_vals.get(key, [])
+        cosmic     = bin_cosmic.get(key, {c: set() for c in _COSMIC_COLS})
 
+        if (cur_chrom == chrom and
+                cur_end == b_start and       # adjacent bin
+                cur_patients == patients):   # identical patient set
+            # Extend current region
+            cur_end     = b_end
+            cur_cn_vals.extend(cn_vals)
+            for c in _COSMIC_COLS:
+                cur_cosmic[c].update(cosmic.get(c, set()))
+            cur_n_bins += 1
+        else:
+            # Flush previous region and start new one
+            if cur_chrom is not None:
+                _flush(cur_chrom, cur_start, cur_end,
+                       cur_patients, cur_cn_vals, cur_cosmic, cur_n_bins)
+            cur_chrom    = chrom
+            cur_start    = b_start
+            cur_end      = b_end
+            cur_patients = patients
+            cur_cn_vals  = list(cn_vals)
+            cur_cosmic   = {c: set(cosmic.get(c, set())) for c in _COSMIC_COLS}
+            cur_n_bins   = 1
 
-    return (pd.DataFrame(rows)
-            .sort_values("frequency", ascending=False)
+    if cur_chrom is not None:
+        _flush(cur_chrom, cur_start, cur_end,
+               cur_patients, cur_cn_vals, cur_cosmic, cur_n_bins)
+
+    return (pd.DataFrame(merged_rows)
+            .sort_values(["chrom", "bin_start"],
+                         key=lambda col: col.map(chrom_rank)
+                         if col.name == "chrom" else col)
             .reset_index(drop=True))
