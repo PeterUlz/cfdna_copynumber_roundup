@@ -66,13 +66,18 @@ LOG2_COL_CANDIDATES: list[str] = [
 #           sequencing kit tags (_PS, _Avenio, _WGS),
 #           and combinations thereof.
 _SAMPLE_NOISE_RE = re.compile(
-    r"[-_](?:PS|Avenio|WGS)"    # kit / prep tags
-    r"|[-_]S[0-9]+"              # sample-sheet index (_S4, _S13)
-    r"|[-_]L[0-9]+"              # lane (_L002)
-    r"|[-_]R[0-9]+"              # read number (_R1, _R2)
-    r"|[-_][0-9]{3,}$",          # trailing zero-padded number (_001)
+    r"[-_](?:PS|Avenio|WGS|OncoS|Onco|WH)"  # kit / prep / panel / site tags
+    r"|[-_]P[0-9]+[a-zA-Z]*$"               # pool tags at end (_P69u)
+    r"|[-_]S[0-9]+"                           # Illumina sample index (_S4)
+    r"|[-_]L[0-9]+"                           # lane (_L002)
+    r"|[-_]R[0-9]+"                           # read number (_R1, _R2)
+    r"|[-_][0-9]{3,}$"                        # trailing zero-padded number (_001)
+    r"|[-_][a-zA-Z][0-9]+[a-zA-Z]*$",        # trailing letter+digits (_OncoS, _P69u)
     re.IGNORECASE,
 )
+
+# Matches a fully normalized sample name: letter + digits + _ + digits
+_VALID_NORMALIZED = re.compile(r'^[A-Za-z]\d+_\d+$')
 
 
 def normalize_sample_name(name: str) -> str:
@@ -81,24 +86,36 @@ def normalize_sample_name(name: str) -> str:
 
     Steps:
       1. Replace hyphens with underscores.
-      2. Strip a leading 'PS-' or 'PS_' prefix if present.
-      3. Iteratively remove trailing sequencing-pipeline noise tokens
-         (Illumina FASTQ suffixes, kit tags, lane/read numbers).
+      2. Strip a leading 'PS_' prefix if present.
+      3. Iteratively remove trailing sequencing-pipeline noise tokens.
+      4. Final pass: drop a trailing numeric token when the remainder
+         is already a valid <letter><digits>_<digit(s)> name.
+         E.g. B350_8_1 → B350_8.
 
     Examples:
-      B46-5-PS_S4_R1_001              → B46_5
-      B195_1_Avenio_WGS_S13_L002_R1_001 → B195_1
-      B220_5_PS_Avenio_S20_L002_R1_001   → B220_5
+      P66_1_P69u                         → P66_1
+      B350_8_1                           → B350_8
+      C434_1_OncoS                       → C434_1
+      B46-5-PS_S4_R1_001                 → B46_5
+      B195_1_Avenio_WGS_S13_L002_R1_001  → B195_1
       B163_6_R1                          → B163_6
       C130_3                             → C130_3  (unchanged)
     """
     name = name.replace("-", "_")
-    name = re.sub(r"^PS[_]", "", name)   # leading PS_ prefix
-    # Iteratively strip trailing noise until stable
+    name = re.sub(r"^PS[_]", "", name)
     prev = None
     while prev != name:
         prev = name
         name = _SAMPLE_NOISE_RE.sub("", name).rstrip("_")
+
+    # Final pass: drop a trailing all-numeric token when the remainder
+    # already forms a valid normalized sample name.
+    parts = name.split("_")
+    if len(parts) >= 3:
+        candidate = "_".join(parts[:-1])
+        if _VALID_NORMALIZED.match(candidate) and parts[-1].isdigit():
+            name = candidate
+
     return name
 
 
