@@ -40,6 +40,13 @@ def _build_ichorcna_parser(sub: argparse._SubParsersAction) -> None:
     # Tumor fraction
     p.add_argument("--tf-threshold", type=float, default=0.03,
                    help="Minimum tumor fraction (default 3%%).")
+    p.add_argument("--exclude-entities", nargs="+", default=[],
+                   metavar="ENTITY",
+                   help="Entity names to exclude from all analysis "
+                        "(e.g. --exclude-entities Lung Ovarian). "
+                        "Entity names are case-sensitive and must match "
+                        "those derived by entity_from_sample "
+                        "(Breast, Colorectal, Prostate, Lung, Ovarian, Other).")
     p.add_argument("--min-reads", type=int, default=1_000_000,
                    help="Minimum total reads from WIG file to include a "
                         "sample (default 1,000,000). Samples below this "

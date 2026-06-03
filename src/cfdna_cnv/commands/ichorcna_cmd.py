@@ -32,6 +32,7 @@ from ..ichorcna.focal_amp import (
     stream_focal_amplifications,
     aggregate_focal_frequencies,
 )
+from ..ichorcna.plots import entity_from_sample
 
 
 def _safe_read(p: Path, **kwargs) -> pd.DataFrame | None:
@@ -119,6 +120,27 @@ def run(args: argparse.Namespace) -> None:
     seg_50k_files  = filter_seg_files_by_tf_df(seg_50k_files,  tf_df)
     seg_50k_bins   = filter_seg_files_by_tf_df(seg_50k_bins,   tf_df)
     seg_1mb_files  = filter_seg_files_by_tf_df(seg_1mb_files,  tf_df)
+
+    # ── 1b. Entity exclusion ─────────────────────────────────────────────────
+    excluded_entities = getattr(args, "exclude_entities", [])
+    if excluded_entities:
+        tf_df["_entity"] = tf_df["patient"].apply(
+            lambda p: entity_from_sample(str(p))
+        )
+        mask_excl = tf_df["_entity"].isin(excluded_entities)
+        n_excl    = int(mask_excl.sum())
+        if n_excl:
+            excl_counts = tf_df[mask_excl]["_entity"].value_counts().to_dict()
+            print(f"      Excluding entities: {excluded_entities} "
+                  f"→ removing {n_excl} samples {excl_counts}")
+            tf_df = tf_df[~mask_excl].drop(columns=["_entity"])
+            seg_50k_files = filter_seg_files_by_tf_df(seg_50k_files, tf_df)
+            seg_50k_bins  = filter_seg_files_by_tf_df(seg_50k_bins,  tf_df)
+            seg_1mb_files = filter_seg_files_by_tf_df(seg_1mb_files, tf_df)
+        else:
+            tf_df = tf_df.drop(columns=["_entity"])
+            print(f"      --exclude-entities {excluded_entities}: "
+                  f"no matching samples found.")
 
     # ── 2. TF filter ─────────────────────────────────────────────────────────
     threshold  = args.tf_threshold
