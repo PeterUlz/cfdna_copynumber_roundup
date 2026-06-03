@@ -136,18 +136,31 @@ def parse_patient_timepoint(sample_name: str) -> tuple[str, int | None]:
 # File discovery
 # ---------------------------------------------------------------------------
 
-def find_sample_files(directory: Path, extension: str) -> dict[str, Path]:
+def find_sample_files(
+        directory: Path,
+        extension: str,
+        keep_duplicates: bool = False,
+) -> dict[str, Path]:
     """
-    Recursively walk *directory* with os.scandir (memory-efficient) and
-    collect all files ending with *extension*.
+    Recursively walk *directory* and collect all files ending with *extension*.
 
     The sample name is taken from the immediate parent subdirectory name
     (ichorCNA layout: <root>/<sample>/<sample>.params.txt).
     Falls back to the file stem for flat layouts.
 
+    Parameters
+    ----------
+    keep_duplicates : if True, when two raw names normalize to the same
+                      string, keep BOTH under their original raw names so
+                      the caller can resolve which to use (e.g. by read
+                      depth). If False (default), keep the first found and
+                      emit a warning — use this only when no better
+                      resolution strategy is available.
+
     Returns {normalized_sample_name: Path}.
     """
-    result: dict[str, Path] = {}
+    result:    dict[str, Path] = {}
+    raw_index: dict[str, str]  = {}   # norm → raw_name of the winner
 
     def _walk(dirpath: str):
         try:
@@ -162,17 +175,52 @@ def find_sample_files(directory: Path, extension: str) -> dict[str, Path]:
 
     for p in _walk(str(directory)):
         raw_name = p.parent.name if p.parent != directory else p.name[: -len(extension)]
-        norm = normalize_sample_name(raw_name)
+        norm     = normalize_sample_name(raw_name)
         if norm not in result:
-            result[norm] = p
+            result[norm]    = p
+            raw_index[norm] = raw_name
         else:
-            print(f"  [WARN] Duplicate after normalization: {p} vs {result[norm]} — keeping first.")
+            if keep_duplicates:
+                # Store under the original raw name so caller can resolve
+                result[raw_name] = p
+            else:
+                print(f"  [WARN] Duplicate after normalization: "
+                      f"{raw_name} vs {raw_index[norm]} — "
+                      f"keeping first (pass keep_duplicates=True to "
+                      f"resolve by coverage instead).")
 
     return result
 
 
-# ---------------------------------------------------------------------------
-# .params.txt parser
+def filter_seg_files_by_tf_df(
+        seg_files: dict[str, Path],
+        tf_df:     "pd.DataFrame",
+) -> dict[str, Path]:
+    """
+    Filter a seg-file index to only the samples present in tf_df.
+
+    After collect_tumor_fractions has resolved duplicates by coverage,
+    tf_df contains exactly one row per (patient, timepoint).  This
+    function removes any seg-file entries whose normalized sample name
+    is not in tf_df["sample"], silently dropping the losers without
+    any further warnings.
+
+    Parameters
+    ----------
+    seg_files : {normalized_sample_name: Path} from find_sample_files.
+    tf_df     : DataFrame from collect_tumor_fractions; must have a
+                'sample' column.
+
+    Returns filtered {sample: Path} dict.
+    """
+    keep = set(tf_df["sample"].astype(str))
+    removed = [s for s in seg_files if s not in keep]
+    if removed:
+        print(f"  [INFO] Removed {len(removed)} duplicate/low-coverage seg "
+              f"entries after coverage-based resolution.")
+    return {s: p for s, p in seg_files.items() if s in keep}
+
+
 # ---------------------------------------------------------------------------
 
 def parse_params(params_path: Path) -> float | None:

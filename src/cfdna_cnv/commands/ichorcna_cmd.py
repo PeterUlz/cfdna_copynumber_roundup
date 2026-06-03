@@ -13,7 +13,8 @@ from pathlib import Path
 import pandas as pd
 
 from ..common.cosmic import load_cosmic_cgc
-from ..common.io import find_sample_files, collect_tumor_fractions, parse_wig_total_reads
+from ..common.io import (find_sample_files, collect_tumor_fractions,
+                          parse_wig_total_reads, filter_seg_files_by_tf_df)
 from ..ichorcna.qc import find_incomplete_runs, validate_all_seg_files
 from ..ichorcna.longitudinal import longitudinal_comparison, emergent_focal_amps
 from ..ichorcna.focal_amp_plots import plot_all_focal_amp_diagnostics
@@ -112,6 +113,12 @@ def run(args: argparse.Namespace) -> None:
     tf_out = outdir / "tf_summary.tsv"
     tf_df.to_csv(tf_out, sep="\t", index=False)
     print(f"      Written: {tf_out}")
+
+    # Filter all seg file indices to only samples that survived coverage
+    # deduplication in collect_tumor_fractions
+    seg_50k_files  = filter_seg_files_by_tf_df(seg_50k_files,  tf_df)
+    seg_50k_bins   = filter_seg_files_by_tf_df(seg_50k_bins,   tf_df)
+    seg_1mb_files  = filter_seg_files_by_tf_df(seg_1mb_files,  tf_df)
 
     # ── 2. TF filter ─────────────────────────────────────────────────────────
     threshold  = args.tf_threshold

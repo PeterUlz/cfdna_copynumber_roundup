@@ -15,9 +15,10 @@ from ..cbio.liftover import liftover_entity_files, check_chain_file, check_lifto
 from ..cbio.frequencies import (
     compute_frequencies,
     detect_focal_amps_cbio,
-    compute_focal_amp_frequencies,
 )
-from ..cbio.plots import plot_cna_frequencies, plot_focal_amp_frequencies
+from ..cbio.plots import plot_cna_frequencies
+from ..ichorcna.focal_amp import aggregate_focal_frequencies
+from ..ichorcna.plots import plot_focal_amp_frequencies as plot_focal_amp_ichorcna
 
 
 def _parse_paths(raw: str) -> list[Path]:
@@ -220,11 +221,17 @@ def run(args: argparse.Namespace) -> None:
         n_gained = int((freq["freq_gain"] > 0).sum())
         n_lost   = int((freq["freq_loss"] > 0).sum())
         label    = ENTITY_PALETTE.get(entity, {}).get("label", entity)
-        n_loci   = (len(combined_focal[combined_focal["entity"] == entity])
-                    if not combined_focal.empty else 0)
+        if not freq_focal.empty:
+            ent_col = f"freq_{entity}"
+            if ent_col in freq_focal.columns:
+                n_loci = int((freq_focal[ent_col] > 0).sum())
+            else:
+                n_loci = len(freq_focal)
+        else:
+            n_loci = 0
         print(f"  {label:25s}: {n_pts:4d} patients | "
               f"{n_gained:4d} bins with gain | "
               f"{n_lost:4d} bins with loss | "
-              f"{n_loci:4d} focal amp loci")
+              f"{n_loci:4d} focal amp regions")
     print(f"\nResults written to: {outdir.resolve()}")
     print("=" * 65)
