@@ -312,12 +312,16 @@ def collect_tumor_fractions(
     unavailable, the one with higher tumor_fraction is kept.
     """
     rows = []
-    for sample, path in params_files.items():
-        tf = parse_params(path)
+    for raw_sample, path in params_files.items():
+        # Always normalize the key — with keep_duplicates=True, the dict may
+        # contain raw names like "P574-2_S6_R1" that haven't been normalized yet
+        sample  = normalize_sample_name(raw_sample)
+        tf      = parse_params(path)
         patient, tp = parse_patient_timepoint(sample)
         reads: int | None = None
         if wig_files:
-            wig_path = wig_files.get(sample)
+            # Try both raw and normalized key for WIG lookup
+            wig_path = wig_files.get(raw_sample) or wig_files.get(sample)
             if wig_path:
                 reads = parse_wig_total_reads(wig_path)
         rows.append({

@@ -100,11 +100,11 @@ def run(args: argparse.Namespace) -> None:
 
     # ── 1. Tumor fractions ───────────────────────────────────────────────────
     print(f"\n[1/7] Collecting tumor fractions from 1 Mbp run ({dir_1mb}) …")
-    params_1mb = find_sample_files(dir_1mb, ".params.txt")
+    params_1mb = find_sample_files(dir_1mb, ".params.txt", keep_duplicates=True)
     print(f"      Found {len(params_1mb)} samples via .params.txt files.")
 
     # Find WIG files for read-count QC and duplicate resolution
-    wig_files = find_sample_files(dir_1mb, ".wig")
+    wig_files = find_sample_files(dir_1mb, ".wig", keep_duplicates=True)
     if wig_files:
         print(f"      Found {len(wig_files)} WIG files for read-count QC.")
     else:
@@ -114,33 +114,6 @@ def run(args: argparse.Namespace) -> None:
     tf_out = outdir / "tf_summary.tsv"
     tf_df.to_csv(tf_out, sep="\t", index=False)
     print(f"      Written: {tf_out}")
-
-    # Filter all seg file indices to only samples that survived coverage
-    # deduplication in collect_tumor_fractions
-    seg_50k_files  = filter_seg_files_by_tf_df(seg_50k_files,  tf_df)
-    seg_50k_bins   = filter_seg_files_by_tf_df(seg_50k_bins,   tf_df)
-    seg_1mb_files  = filter_seg_files_by_tf_df(seg_1mb_files,  tf_df)
-
-    # ── 1b. Entity exclusion ─────────────────────────────────────────────────
-    excluded_entities = getattr(args, "exclude_entities", [])
-    if excluded_entities:
-        tf_df["_entity"] = tf_df["patient"].apply(
-            lambda p: entity_from_sample(str(p))
-        )
-        mask_excl = tf_df["_entity"].isin(excluded_entities)
-        n_excl    = int(mask_excl.sum())
-        if n_excl:
-            excl_counts = tf_df[mask_excl]["_entity"].value_counts().to_dict()
-            print(f"      Excluding entities: {excluded_entities} "
-                  f"→ removing {n_excl} samples {excl_counts}")
-            tf_df = tf_df[~mask_excl].drop(columns=["_entity"])
-            seg_50k_files = filter_seg_files_by_tf_df(seg_50k_files, tf_df)
-            seg_50k_bins  = filter_seg_files_by_tf_df(seg_50k_bins,  tf_df)
-            seg_1mb_files = filter_seg_files_by_tf_df(seg_1mb_files, tf_df)
-        else:
-            tf_df = tf_df.drop(columns=["_entity"])
-            print(f"      --exclude-entities {excluded_entities}: "
-                  f"no matching samples found.")
 
     # ── 2. TF filter ─────────────────────────────────────────────────────────
     threshold  = args.tf_threshold
@@ -187,7 +160,7 @@ def run(args: argparse.Namespace) -> None:
         else:
             extensions = (".cna.seg", ".seg.txt", ".seg")
         for ext in extensions:
-            found = find_sample_files(directory, ext)
+            found = find_sample_files(directory, ext, keep_duplicates=True)
             if found:
                 print(f"        Using extension '{ext}' ({len(found)} files found).")
                 return found
@@ -203,6 +176,34 @@ def run(args: argparse.Namespace) -> None:
 
     seg_50k_bins = _find_seg(dir_50k, prefer_segmented=False)
     print(f"      Found {len(seg_50k_bins)} segment files (50 kbp, bin-level .cna.seg).")
+
+    # Filter seg files to only samples that survived coverage deduplication
+    seg_1mb_files = filter_seg_files_by_tf_df(seg_1mb_files, tf_df)
+    seg_50k_files = filter_seg_files_by_tf_df(seg_50k_files, tf_df)
+    seg_50k_bins  = filter_seg_files_by_tf_df(seg_50k_bins,  tf_df)
+
+    # ── Entity exclusion ─────────────────────────────────────────────────────
+    excluded_entities = getattr(args, "exclude_entities", [])
+    if excluded_entities:
+        tf_df["_entity"] = tf_df["patient"].apply(
+            lambda p: entity_from_sample(str(p))
+        )
+        mask_excl = tf_df["_entity"].isin(excluded_entities)
+        n_excl    = int(mask_excl.sum())
+        if n_excl:
+            excl_counts = tf_df[mask_excl]["_entity"].value_counts().to_dict()
+            print(f"      Excluding entities: {excluded_entities} "
+                  f"→ removing {n_excl} samples {excl_counts}")
+            tf_df         = tf_df[~mask_excl].drop(columns=["_entity"])
+            high_tf_samples = [s for s in high_tf_samples
+                               if s in set(tf_df["sample"])]
+            seg_1mb_files = filter_seg_files_by_tf_df(seg_1mb_files, tf_df)
+            seg_50k_files = filter_seg_files_by_tf_df(seg_50k_files, tf_df)
+            seg_50k_bins  = filter_seg_files_by_tf_df(seg_50k_bins,  tf_df)
+        else:
+            tf_df = tf_df.drop(columns=["_entity"])
+            print(f"      --exclude-entities {excluded_entities}: "
+                  f"no matching samples found.")
 
     seg_1mb_hightf = {s: p for s, p in seg_1mb_files.items()
                       if s in set(high_tf_samples)}
@@ -247,7 +248,7 @@ def run(args: argparse.Namespace) -> None:
     print(f"      Processing {len(seg_1mb_hightf)} high-TF samples …")
     if seg_1mb_hightf:
         # Build sample→entity map from tf_df so broad CNA counts are per entity
-        from ..ichorcna.plots import ENTITY_MAP, entity_from_sample
+        from ..ichorcna.plots import ENTITY_MAP
         _sample_entity = {
             row["sample"]: entity_from_sample(str(row["patient"]))
             for _, row in tf_df.iterrows()
