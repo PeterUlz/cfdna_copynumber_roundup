@@ -7,8 +7,8 @@
 #   cfdna-cnv ichorcna --config analysis.yaml --tf-threshold 0.05
 
 # ── Input / output ──────────────────────────────────────────────────────────
-dir-1mb:  /path/to/ichorCNA_1Mbp_output    # required
-dir-50kb: /path/to/ichorCNA_50kbp_output   # required
+dir-1mb:  ./output_1Mbp    # required
+dir-50kb: ./output   # required
 output:   ichorcna_results
 
 # ── Sample filtering ─────────────────────────────────────────────────────────
@@ -26,21 +26,21 @@ log2:
 
 # ── Focal amplification detection ───────────────────────────────────────────
 focal:
-  min-bp:               50000   # Minimum segment size (50 kbp)
-  max-bp:               500000  # Maximum segment size (500 kbp)
+  min-bp:               150000   # Minimum segment size (150 kbp)
+  max-bp:               15000000  # Maximum segment size (15 Mbp)
   min-bins:             3       # Minimum 50 kbp bins in segment (≥ 150 kbp)
-  flank-bins:           2       # Background window: 2 × 1 Mbp on each side
+  flank-bins:           20       # Background window: 2 × 1 Mbp on each side
   noise-factor:         2.0     # Segment logR must be ≥ noise_factor × noise
-  max-focal-per-sample: 5       # Discard samples with > N focal amps
+  max-focal-per-sample: 50       # Discard samples with > N focal amps
   freq-min-freq:        0.0     # Min patient frequency for frequency plot
-  amp-diagnostics:      false   # Generate per-sample diagnostic plots
+  amp-diagnostics:      true   # Generate per-sample diagnostic plots
 
 # ── Broad CNA plot ───────────────────────────────────────────────────────────
 plot:
-  bin-size: 5000000       # Genomic bin size for broad CNA frequency plot (5 Mbp)
+  bin-size: 1000000       # Genomic bin size for broad CNA frequency plot (1 Mbp)
 
 # ── COSMIC annotation ────────────────────────────────────────────────────────
-# cosmic-cgc: /path/to/Census_allThu.tsv
+cosmic-cgc: ref/Census_allFri_Sep_6_09_26_04_2024.tsv
 
 # ── Longitudinal plots ───────────────────────────────────────────────────────
 longitudinal:

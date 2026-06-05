@@ -38,7 +38,7 @@ def _build_ichorcna_parser(sub: argparse._SubParsersAction) -> None:
     # Input
     p.add_argument("--dir-1mb",  default=None,
                    help="Directory containing ichorCNA 1 Mbp run output.")
-    p.add_argument("--dir-50kb", required=True,
+    p.add_argument("--dir-50kb", default=None,
                    help="Directory containing ichorCNA 50 kbp run output.")
     # Output
     p.add_argument("--output", default="ichorcna_results",
