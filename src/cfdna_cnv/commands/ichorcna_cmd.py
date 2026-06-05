@@ -450,16 +450,25 @@ def run(args: argparse.Namespace) -> None:
         # Use 50 kbp .cna.seg files for bin-level (unsegmented) log2 ratios
         _max_noise = getattr(args, "max_noise", 0.15) or None
         _min_signal = getattr(args, "min_signal", None)
+        _emergent_tsv = outdir / "emergent_cna_regions.tsv"
         n_generated = plot_all_pairwise_longitudinal(
-            tf_df          = _tf_for_longit,
-            seg_files      = seg_50k_bins,
-            seg_files_segs = seg_50k_files,
-            output_dir     = longit_plot_dir,
-            min_tf         = 0.10,
-            focal_tsv      = outdir / "focal_amplifications.tsv",
-            max_noise      = _max_noise,
-            min_signal     = _min_signal,
+            tf_df                = _tf_for_longit,
+            seg_files            = seg_50k_bins,
+            seg_files_segs       = seg_50k_files,
+            output_dir           = longit_plot_dir,
+            min_tf               = 0.10,
+            focal_tsv            = outdir / "focal_amplifications.tsv",
+            max_noise            = _max_noise,
+            min_signal           = _min_signal,
+            min_altered_fraction = getattr(args, "min_altered_fraction", 0.05),
+            plot_raw             = getattr(args, "plot_raw", False),
+            emergent_min_bins    = getattr(args, "emergent_min_bins", 3),
+            emergent_min_delta   = getattr(args, "emergent_min_delta", 0.2),
+            emergent_tsv         = _emergent_tsv,
         )
+        if _emergent_tsv.exists() and _emergent_tsv.stat().st_size > 0:
+            n_emerg = sum(1 for _ in open(_emergent_tsv)) - 1
+            print(f"      Emergent CNA regions: {n_emerg} → {_emergent_tsv}")
         print(f"      Generated {n_generated} pairwise plot(s).")
 
         # Note: differential plot is now included as the bottom panel

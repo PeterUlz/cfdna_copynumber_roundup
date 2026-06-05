@@ -529,8 +529,8 @@ def plot_pairwise_longitudinal(
     print(f"        Optimal multiplier: {best_m:.3f},  RMSE: {best_rmse:.4f}")
 
     # Per-sample signal metrics
-    q_a, n_above_a, noise_a = _signal_metrics(bins_a)
-    q_b, n_above_b, noise_b = _signal_metrics(bins_b)
+    q_a, n_above_a, noise_a, snr_a = _signal_metrics(bins_a)
+    q_b, n_above_b, noise_b, snr_b = _signal_metrics(bins_b)
     pair_noise = max(
         noise_a if not np.isnan(noise_a) else 0.0,
         noise_b if not np.isnan(noise_b) else 0.0,
@@ -544,9 +544,9 @@ def plot_pairwise_longitudinal(
               f"— skipping plot.")
         return
     if min_signal is not None:
-        if q_a < min_signal or q_b < min_signal:
-            print(f"        Signal p95 ({q_a:.3f}, {q_b:.3f}) below "
-                  f"min_signal {min_signal:.3f} — skipping plot.")
+        if snr_a < min_signal or snr_b < min_signal:
+            print(f"        SNR ({snr_a:.2f}, {snr_b:.2f}) below "
+                  f"min_signal {min_signal:.2f} — skipping plot.")
             return
 
     # Focal amp regions for shading
@@ -654,98 +654,285 @@ def plot_pairwise_longitudinal(
 
 
 # ---------------------------------------------------------------------------
+# Emergent CNA detection from differential track
+# ---------------------------------------------------------------------------
+
+def _detect_emergent_cnas(
+        diff_df:     pd.DataFrame,
+        min_bins:    int   = 3,
+        min_delta:   float = 0.2,
+        patient:     str   = "",
+        sample_a:    str   = "",
+        sample_b:    str   = "",
+        timepoint_a: "int | None" = None,
+        timepoint_b: "int | None" = None,
+) -> list[dict]:
+    """
+    Detect emergent CNA regions in the smoothed differential track.
+
+    A region is reported when >= min_bins *consecutive* bins on the same
+    chromosome have |delta_logr| > min_delta.  Consecutive runs with the
+    same direction are merged; direction changes start a new region.
+
+    Returns a list of dicts with keys:
+        chrom, start, end, n_bins, mean_delta, max_abs_delta, direction,
+        patient, sample_a, sample_b, timepoint_a, timepoint_b
+    """
+    if diff_df.empty or "delta_logr" not in diff_df.columns:
+        return []
+
+    regions = []
+    for chrom, grp in diff_df.groupby("chrom"):
+        grp  = grp.sort_values("start").reset_index(drop=True)
+        vals = grp["delta_logr"].values
+
+        run_start  = None
+        run_end    = None
+        run_vals: list[float] = []
+        run_dir    = None
+
+        def _flush_run():
+            if run_start is None or len(run_vals) < min_bins:
+                return
+            regions.append({
+                "chrom":          chrom,
+                "start":          run_start,
+                "end":            run_end,
+                "n_bins":         len(run_vals),
+                "mean_delta":     round(float(np.mean(run_vals)), 4),
+                "max_abs_delta":  round(float(np.max(np.abs(run_vals))), 4),
+                "direction":      run_dir,
+                "patient":        patient,
+                "sample_a":       sample_a,
+                "sample_b":       sample_b,
+                "timepoint_a":    timepoint_a,
+                "timepoint_b":    timepoint_b,
+            })
+
+        for i, row in grp.iterrows():
+            delta = vals[i]
+            if pd.isna(delta) or abs(delta) <= min_delta:
+                _flush_run()
+                run_start = run_end = run_vals = None
+                run_dir   = None
+                run_vals  = []
+                continue
+            direction = "gain" if delta > 0 else "loss"
+            if run_start is None:
+                run_start = int(row["start"])
+                run_end   = int(row["end"])
+                run_vals  = [float(delta)]
+                run_dir   = direction
+            elif direction == run_dir:
+                run_end = int(row["end"])
+                run_vals.append(float(delta))
+            else:
+                _flush_run()
+                run_start = int(row["start"])
+                run_end   = int(row["end"])
+                run_vals  = [float(delta)]
+                run_dir   = direction
+        _flush_run()
+
+    return regions
+
+
+def _append_emergent_tsv(regions: list[dict], tsv_path: Path) -> None:
+    """Append emergent CNA regions to a TSV (creates header on first write)."""
+    if not regions:
+        return
+    df      = pd.DataFrame(regions)
+    write_h = not tsv_path.exists() or tsv_path.stat().st_size == 0
+    df.to_csv(tsv_path, sep="\t", index=False,
+              mode="a" if not write_h else "w",
+              header=write_h)
+
+
+# ---------------------------------------------------------------------------
 # Combined two-panel plot: profiles on top, differential below
 # ---------------------------------------------------------------------------
 
 def plot_longitudinal_combined(
-        sample_a:        str,
-        seg_path_a:      Path,
-        tf_a:            float,
-        sample_b:        str,
-        seg_path_b:      Path,
-        tf_b:            float,
-        output_path:     Path,
-        patient:         str = "",
-        entity:          str = "",
-        timepoint_a:     int | None = None,
-        timepoint_b:     int | None = None,
-        logr_ylim:       tuple[float, float] = (-2.5, 2.5),
-        delta_ylim:      tuple[float, float] = (-3.0, 3.0),
-        focal_tsv:       Path | None = None,
-        max_noise:       float | None = 0.15,
-        min_signal:      float | None = None,
-        seg_path_a_segs: Path | None = None,
-        seg_path_b_segs: Path | None = None,
+        sample_a:             str,
+        seg_path_a:           Path,
+        tf_a:                 float,
+        sample_b:             str,
+        seg_path_b:           Path,
+        tf_b:                 float,
+        output_path:          Path,
+        patient:              str = "",
+        entity:               str = "",
+        timepoint_a:          int | None = None,
+        timepoint_b:          int | None = None,
+        logr_ylim:            tuple[float, float] = (-2.5, 2.5),
+        delta_ylim:           tuple[float, float] = (-3.0, 3.0),
+        focal_tsv:            Path | None = None,
+        max_noise:            float | None = 0.15,
+        min_signal:           float | None = None,
+        seg_path_a_segs:      Path | None = None,
+        seg_path_b_segs:      Path | None = None,
+        min_altered_fraction: float = 0.05,
+        plot_raw:             bool  = False,
+        emergent_min_bins:    int   = 3,
+        emergent_min_delta:   float = 0.2,
+        emergent_tsv:         Path | None = None,
 ) -> None:
     """
-    Generate a two-panel genome-wide longitudinal comparison plot:
-      - Top panel    : TF-corrected log2 ratios for both samples
-      - Bottom panel : differential (later − earlier)
+    Two-panel longitudinal comparison with 10-bin smoothing as the primary
+    processing step.
 
-    All preparation (loading, scaling, metrics, focal amp regions) is done
-    once and shared between both panels.
+    Pipeline
+    --------
+    1. Load raw 50 kbp bin-level logR.
+    2. Apply 10-bin running mean smoothing.
+    3. Filter: fraction of bins with |logR| > 0.2 must exceed
+       min_altered_fraction for both samples (default 5 %).
+    4. Compute neighbour-noise and SNR filters on smoothed profiles.
+    5. Compute TF scaling on the 10-bin-smoothed profiles.
+    6. Build 5-bin and 10-bin differentials.
+    7. Detect emergent CNA regions (>= emergent_min_bins consecutive bins
+       with |delta| > emergent_min_delta).
+    8. Output:
+         - 5-bin smoothed plot  (always)
+         - 10-bin smoothed plot (always)
+         - raw plot             (only if plot_raw=True)
     """
     pal     = ICHORCNA_ENTITY_PALETTE.get(entity, ICHORCNA_ENTITY_PALETTE["Other"])
     color_a = "#888888"
     color_b = pal["gain"]
 
-    # ── Load and scale ───────────────────────────────────────────────────────
-    bins_a = _load_bins(seg_path_a, sample_a, tf_from=tf_a)
-    bins_b = _load_bins(seg_path_b, sample_b, tf_from=tf_b)
-
-    if bins_a is None or bins_b is None:
+    # ── Load raw bins ────────────────────────────────────────────────────────
+    bins_a_raw = _load_bins(seg_path_a, sample_a, tf_from=tf_a)
+    bins_b_raw = _load_bins(seg_path_b, sample_b, tf_from=tf_b)
+    if bins_a_raw is None or bins_b_raw is None:
         print(f"      [WARN] Could not load bin-level data for "
               f"{sample_a} or {sample_b} — skipping.")
         return
 
-    if seg_path_a_segs is not None and seg_path_b_segs is not None:
-        seg_a = _load_bins_with_seg_means(seg_path_a, seg_path_a_segs,
-                                          sample_a, tf_a)
-        seg_b = _load_bins_with_seg_means(seg_path_b, seg_path_b_segs,
-                                          sample_b, tf_b)
-    else:
-        seg_a, seg_b = bins_a, bins_b
+    # ── Smoothing helpers ────────────────────────────────────────────────────
+    def _smooth(df: pd.DataFrame, window: int,
+                col: str = "logr_corrected") -> pd.DataFrame:
+        if window <= 1:
+            return df
+        out      = df.reset_index(drop=True).copy()
+        smoothed = np.full(len(out), np.nan)
+        half     = window // 2
+        for _, grp in out.groupby("chrom"):
+            pos  = grp.index.tolist()
+            vals = grp[col].values.astype(float)
+            n    = len(vals)
+            for i in range(n):
+                lo     = max(0, i - half)
+                hi     = min(n, i + window - half)
+                fin    = vals[lo:hi][np.isfinite(vals[lo:hi])]
+                smoothed[pos[i]] = float(np.mean(fin)) if len(fin) else np.nan
+        out[col] = smoothed
+        return out
 
-    aligned = _align_bins(
-        seg_a if seg_a is not None else bins_a,
-        seg_b if seg_b is not None else bins_b,
-    )
+    # ── 10-bin smoothing for filtering + scaling ─────────────────────────────
+    bins_a_s10 = _smooth(bins_a_raw, 10)
+    bins_b_s10 = _smooth(bins_b_raw, 10)
+
+    # ── Filter 1: altered bin fraction ──────────────────────────────────────
+    def _altered_frac(df: pd.DataFrame) -> float:
+        v = df["logr_corrected"].dropna().values
+        return float(np.mean(np.abs(v) > 0.2)) if len(v) else 0.0
+
+    frac_a = _altered_frac(bins_a_s10)
+    frac_b = _altered_frac(bins_b_s10)
+
+    if min_altered_fraction > 0 and (frac_a < min_altered_fraction or
+                                      frac_b < min_altered_fraction):
+        print(f"        Altered fraction ({frac_a:.3f}, {frac_b:.3f}) "
+              f"< {min_altered_fraction:.3f} — skipping.")
+        return
+
+    # ── Filter 2: neighbour noise on raw bins ────────────────────────────────
+    noise_a    = _neighbour_noise(bins_a_raw)
+    noise_b    = _neighbour_noise(bins_b_raw)
+    pair_noise = max(noise_a if not np.isnan(noise_a) else 0.0,
+                     noise_b if not np.isnan(noise_b) else 0.0)
+    if max_noise is not None and pair_noise > max_noise:
+        print(f"        Pair noise {pair_noise:.4f} > {max_noise:.4f} — skipping.")
+        return
+
+    # ── Signal metrics on smoothed bins ─────────────────────────────────────
+    q_a, n_above_a, _, snr_a = _signal_metrics(bins_a_s10)
+    q_b, n_above_b, _, snr_b = _signal_metrics(bins_b_s10)
+    print(f"        {sample_a}: noise={noise_a:.4f}  p95={q_a:.3f}  "
+          f"snr={snr_a:.2f}  altered={frac_a:.3f}")
+    print(f"        {sample_b}: noise={noise_b:.4f}  p95={q_b:.3f}  "
+          f"snr={snr_b:.2f}  altered={frac_b:.3f}")
+
+    if min_signal is not None and (snr_a < min_signal or snr_b < min_signal):
+        print(f"        SNR ({snr_a:.2f}, {snr_b:.2f}) < "
+              f"{min_signal:.2f} — skipping.")
+        return
+
+    # ── TF scaling on 10-bin-smoothed profiles ───────────────────────────────
+    if seg_path_a_segs is not None and seg_path_b_segs is not None:
+        seg_a_s10 = _smooth(_load_bins_with_seg_means(
+                        seg_path_a, seg_path_a_segs, sample_a, tf_a), 10)                     or bins_a_s10
+        seg_b_s10 = _smooth(_load_bins_with_seg_means(
+                        seg_path_b, seg_path_b_segs, sample_b, tf_b), 10)                     or bins_b_s10
+    else:
+        seg_a_s10, seg_b_s10 = bins_a_s10, bins_b_s10
+
+    aligned = _align_bins(seg_a_s10, seg_b_s10)
     if aligned.empty:
-        print(f"      [WARN] No overlapping bins — skipping.")
+        print("      [WARN] No overlapping bins — skipping.")
         return
 
     if tf_a >= tf_b:
         best_m, _ = _optimise_scaling(
-            aligned["logr_a"].values, aligned["logr_b"].values
-        )
-        bins_b = bins_b.copy()
-        bins_b["logr_corrected"] = bins_b["logr_corrected"] * best_m
+            aligned["logr_a"].values, aligned["logr_b"].values)
+        def _scale(df): out=df.copy(); out["logr_corrected"]*=best_m; return out
+        bins_b_raw = _scale(bins_b_raw)
+        bins_b_s10 = _scale(bins_b_s10)
     else:
         best_m, _ = _optimise_scaling(
-            aligned["logr_b"].values, aligned["logr_a"].values
-        )
-        bins_a = bins_a.copy()
-        bins_a["logr_corrected"] = bins_a["logr_corrected"] * best_m
+            aligned["logr_b"].values, aligned["logr_a"].values)
+        def _scale(df): out=df.copy(); out["logr_corrected"]*=best_m; return out
+        bins_a_raw = _scale(bins_a_raw)
+        bins_a_s10 = _scale(bins_a_s10)
 
-    # ── Signal metrics and filters ───────────────────────────────────────────
-    q_a, n_above_a, noise_a, snr_a = _signal_metrics(bins_a)
-    q_b, n_above_b, noise_b, snr_b = _signal_metrics(bins_b)
-    pair_noise = max(
-        noise_a if not np.isnan(noise_a) else 0.0,
-        noise_b if not np.isnan(noise_b) else 0.0,
+    bins_a_s5 = _smooth(bins_a_raw, 5)
+    bins_b_s5 = _smooth(bins_b_raw, 5)
+
+    # ── Build differentials ──────────────────────────────────────────────────
+    def _diff(ba, bb):
+        d = _align_bins(ba, bb)
+        return d[d["chrom"].isin(_OFFSETS)].reset_index(drop=True)
+
+    diff_raw = _diff(bins_a_raw, bins_b_raw) if plot_raw else pd.DataFrame()
+    diff_s5  = _smooth(_diff(bins_a_s5,  bins_b_s5),  5,  col="delta_logr")
+    diff_s10 = _smooth(_diff(bins_a_s10, bins_b_s10), 10, col="delta_logr")
+
+    # ── Emergent CNA detection ───────────────────────────────────────────────
+    emergent_regions = _detect_emergent_cnas(
+        diff_s10,
+        min_bins    = emergent_min_bins,
+        min_delta   = emergent_min_delta,
+        patient     = patient,
+        sample_a    = sample_a,
+        sample_b    = sample_b,
+        timepoint_a = timepoint_a,
+        timepoint_b = timepoint_b,
     )
-    print(f"        {sample_a}: noise={noise_a:.4f}  p95={q_a:.3f}  "
-          f"snr={snr_a:.2f}  above2×={n_above_a}")
-    print(f"        {sample_b}: noise={noise_b:.4f}  p95={q_b:.3f}  "
-          f"snr={snr_b:.2f}  above2×={n_above_b}")
+    if emergent_regions and emergent_tsv is not None:
+        _append_emergent_tsv(emergent_regions, emergent_tsv)
 
-    if max_noise is not None and pair_noise > max_noise:
-        print(f"        Pair noise {pair_noise:.4f} > {max_noise:.4f} — skipping.")
-        return
-    if min_signal is not None and (snr_a < min_signal or snr_b < min_signal):
-        print(f"        SNR ({snr_a:.2f}, {snr_b:.2f}) below "
-              f"min_signal {min_signal:.2f} — skipping.")
-        return
+    # ── Shared strings ───────────────────────────────────────────────────────
+    tp_a_str  = f"TP{timepoint_a}" if timepoint_a is not None else sample_a
+    tp_b_str  = f"TP{timepoint_b}" if timepoint_b is not None else sample_b
+    noise_str = f"{pair_noise:.3f}" if not np.isnan(pair_noise) else "n/a"
+    title_l1  = (f"{patient}  ({entity})   "
+                 f"{tp_a_str} (TF={tf_a:.1%})  vs  {tp_b_str} (TF={tf_b:.1%})"
+                 f"   scale={best_m:.2f}  noise={noise_str}")
+    title_l2  = (f"{tp_a_str}: p95={q_a:.3f}  snr={snr_a:.2f}  "
+                 f"altered={frac_a:.3f}    "
+                 f"{tp_b_str}: p95={q_b:.3f}  snr={snr_b:.2f}  "
+                 f"altered={frac_b:.3f}")
 
     # ── Focal amp regions ────────────────────────────────────────────────────
     focal_regions: list[dict] = []
@@ -754,151 +941,144 @@ def plot_longitudinal_combined(
             _build_focal_annotations(focal_tsv, patient)
         )
 
-    # ── Build differential ───────────────────────────────────────────────────
-    diff = _align_bins(bins_a, bins_b)
-    diff = diff[diff["chrom"].isin(_OFFSETS)].copy()
+    # ── Render helper ────────────────────────────────────────────────────────
+    def _render(ba, bb, df_diff, out_path, label):
+        fig, (ax_top, ax_bot) = plt.subplots(
+            2, 1, figsize=(22, 9.0), facecolor="white",
+            gridspec_kw={"height_ratios": [1, 1], "hspace": 0.35},
+        )
 
-    tp_a_str  = f"TP{timepoint_a}" if timepoint_a is not None else sample_a
-    tp_b_str  = f"TP{timepoint_b}" if timepoint_b is not None else sample_b
-    noise_str = f"{pair_noise:.3f}" if not np.isnan(pair_noise) else "n/a"
+        def _shade(ax, ylim):
+            for region in focal_regions:
+                ch = region["chrom"]
+                if ch not in _OFFSETS:
+                    continue
+                x0 = _genome_x(ch, region["start"])
+                x1 = _genome_x(ch, region["end"])
+                ax.axvspan(x0, x1, alpha=0.18, color="#b8860b", zorder=2)
+                ax.vlines([x0, x1], ylim[0], ylim[1], colors="#b8860b",
+                          linewidth=0.6, alpha=0.5, zorder=2)
+                genes = str(region.get("cosmic_genes", ""))
+                if genes and genes != "nan":
+                    ax.text((x0+x1)/2, ylim[1]*0.91, genes.split(",")[0],
+                            fontsize=6, color="#b8860b", ha="center",
+                            va="bottom", rotation=90, fontweight="bold",
+                            zorder=5, clip_on=True)
 
-    # ── Figure: 2 rows ───────────────────────────────────────────────────────
-    fig, (ax_top, ax_bot) = plt.subplots(
-        2, 1, figsize=(22, 9.0),
-        facecolor="white",
-        gridspec_kw={"height_ratios": [1, 1], "hspace": 0.35},
-    )
+        _style_ax(ax_top)
+        for ref in [0, 0.58, -0.58]:
+            lw = 0.8 if ref == 0 else 0.4
+            ls = "-" if ref == 0 else ":"
+            cl = "#999999" if ref == 0 else "#cccccc"
+            ax_top.axhline(ref, color=cl, linewidth=lw, linestyle=ls, zorder=1)
+        _shade(ax_top, logr_ylim)
+        for bins, col, al, zo in [(ba, color_a, 0.50, 3),
+                                   (bb, color_b, 0.75, 4)]:
+            xv = bins.apply(lambda r: _genome_x(
+                r["chrom"], (r["start"]+r["end"])/2), axis=1).values
+            yv = np.clip(bins["logr_corrected"].values, *logr_ylim)
+            ax_top.scatter(xv, yv, s=3.0, c=col, alpha=al,
+                           linewidths=0, zorder=zo, rasterized=True)
+        ax_top.set_ylim(logr_ylim)
+        ax_top.set_ylabel("TF-corrected log2 ratio",
+                          fontsize=9, color="#444444", labelpad=5)
+        ax_top.yaxis.set_major_locator(mticker.MultipleLocator(0.5))
+        ax_top.yaxis.set_major_formatter(mticker.FormatStrFormatter("%.1f"))
+        ax_top.text(GENOME_SIZE*1.001, 0, "0", fontsize=7,
+                    color="#888888", va="center")
+        ax_top.set_title(f"{title_l1}   [{label}]\n{title_l2}",
+                         fontsize=10, fontweight="bold", color="#222222",
+                         pad=6, loc="left")
+        top_h = [
+            mpatches.Patch(color=color_a,
+                           label=f"{tp_a_str}  {sample_a}  (TF={tf_a:.1%})"),
+            mpatches.Patch(color=color_b,
+                           label=f"{tp_b_str}  {sample_b}  (TF={tf_b:.1%})"),
+            plt.Line2D([0],[0], color="#999999", linewidth=1, label="log2R=0"),
+        ]
+        if focal_regions:
+            top_h.append(mpatches.Patch(color="#b8860b", alpha=0.4,
+                                         label="Focal amp"))
+        ax_top.legend(handles=top_h, fontsize=8, loc="lower left",
+                      facecolor="white", edgecolor="#cccccc",
+                      labelcolor="#222222", framealpha=1.0)
 
-    def _draw_focal_shading(ax, ylim):
-        for region in focal_regions:
-            chrom = region["chrom"]
-            if chrom not in _OFFSETS:
+        _style_ax(ax_bot)
+        for ref in [0, 0.5, -0.5]:
+            lw = 0.9 if ref == 0 else 0.4
+            ls = "-" if ref == 0 else ":"
+            cl = "#999999" if ref == 0 else "#cccccc"
+            ax_bot.axhline(ref, color=cl, linewidth=lw, linestyle=ls, zorder=1)
+        _shade(ax_bot, delta_ylim)
+        if not df_diff.empty:
+            xv = df_diff.apply(lambda r: _genome_x(
+                r["chrom"], (r["start"]+r["end"])/2), axis=1).values
+            yv = np.clip(df_diff["delta_logr"].values, *delta_ylim)
+            ca = np.where(yv >= 0.5, pal["gain"],
+                 np.where(yv <= -0.5, pal["loss"], "#999999"))
+            ax_bot.scatter(xv, yv, s=3.0, c=ca, alpha=0.70,
+                           linewidths=0, zorder=3, rasterized=True)
+        for reg in emergent_regions:
+            ch = reg["chrom"]
+            if ch not in _OFFSETS:
                 continue
-            x0 = _genome_x(chrom, region["start"])
-            x1 = _genome_x(chrom, region["end"])
-            ax.axvspan(x0, x1, alpha=0.18, color="#b8860b", zorder=2)
-            ax.vlines([x0, x1], ylim[0], ylim[1],
-                      colors="#b8860b", linewidth=0.6, alpha=0.5, zorder=2)
-            genes = region["cosmic_genes"]
-            if genes:
-                ax.text((x0 + x1) / 2, ylim[1] * 0.91,
-                        genes.split(",")[0],
-                        fontsize=6, color="#b8860b", ha="center",
-                        va="bottom", rotation=90, fontweight="bold",
-                        zorder=5, clip_on=True)
+            xr0 = _genome_x(ch, reg["start"])
+            xr1 = _genome_x(ch, reg["end"])
+            shade_c = pal["gain"] if reg["direction"] == "gain" else pal["loss"]
+            ax_bot.axvspan(xr0, xr1, alpha=0.22, color=shade_c, zorder=2)
+        ax_bot.set_ylim(delta_ylim)
+        ax_bot.set_ylabel(f"\u0394 log2 ratio\n({tp_b_str} \u2212 {tp_a_str})",
+                          fontsize=9, color="#444444", labelpad=5)
+        ax_bot.yaxis.set_major_locator(mticker.MultipleLocator(0.5))
+        ax_bot.yaxis.set_major_formatter(mticker.FormatStrFormatter("%.1f"))
+        for txt, yp in [("0", 0), ("+0.5", 0.5), ("\u22120.5", -0.5)]:
+            ax_bot.text(GENOME_SIZE*1.001, yp, txt, fontsize=6 if yp!=0 else 7,
+                        color="#999999" if yp!=0 else "#888888", va="center")
+        bot_h = [
+            mpatches.Patch(color=pal["gain"],
+                           label=f"Gain in {tp_b_str}  (\u0394 > +0.5)"),
+            mpatches.Patch(color=pal["loss"],
+                           label=f"Loss in {tp_b_str}  (\u0394 < \u22120.5)"),
+            mpatches.Patch(color="#999999", label="Unchanged"),
+        ]
+        if emergent_regions:
+            bot_h.append(mpatches.Patch(color=pal["gain"], alpha=0.3,
+                                         label="Emergent CNA"))
+        ax_bot.legend(handles=bot_h, fontsize=8, loc="lower left",
+                      facecolor="white", edgecolor="#cccccc",
+                      labelcolor="#222222", framealpha=1.0)
+        fig.tight_layout()
+        _save(fig, out_path)
 
-    # ── Top panel: both profiles ─────────────────────────────────────────────
-    _style_ax(ax_top)
-    ax_top.axhline( 0,    color="#999999", linewidth=0.8, zorder=1)
-    ax_top.axhline( 0.58, color="#cccccc", linewidth=0.4, linestyle=":", zorder=1)
-    ax_top.axhline(-0.58, color="#cccccc", linewidth=0.4, linestyle=":", zorder=1)
-    _draw_focal_shading(ax_top, logr_ylim)
-
-    for bins, color, alpha, zorder in [
-        (bins_a, color_a, 0.50, 3),
-        (bins_b, color_b, 0.75, 4),
-    ]:
-        x_vals = bins.apply(
-            lambda r: _genome_x(r["chrom"], (r["start"] + r["end"]) / 2),
-            axis=1,
-        ).values
-        y_vals = np.clip(bins["logr_corrected"].values, logr_ylim[0], logr_ylim[1])
-        ax_top.scatter(x_vals, y_vals, s=3.0, c=color, alpha=alpha,
-                       linewidths=0, zorder=zorder, rasterized=True)
-
-    ax_top.set_ylim(logr_ylim)
-    ax_top.set_ylabel("TF-corrected log2 ratio",
-                      fontsize=9, color="#444444", labelpad=5)
-    ax_top.yaxis.set_major_locator(mticker.MultipleLocator(0.5))
-    ax_top.yaxis.set_major_formatter(mticker.FormatStrFormatter("%.1f"))
-    ax_top.text(GENOME_SIZE * 1.001,  0,    "0",     fontsize=7,
-                color="#888888", va="center")
-
-    ax_top.set_title(
-        f"{patient}  ({entity})   "
-        f"{tp_a_str} (TF={tf_a:.1%})  vs  {tp_b_str} (TF={tf_b:.1%})"
-        f"   scale={best_m:.2f}  noise={noise_str}\n"
-        f"{tp_a_str}: p95={q_a:.3f}  snr={snr_a:.2f}  above2×={n_above_a}    "
-        f"{tp_b_str}: p95={q_b:.3f}  snr={snr_b:.2f}  above2×={n_above_b}",
-        fontsize=10, fontweight="bold", color="#222222", pad=6, loc="left",
-    )
-
-    top_handles = [
-        mpatches.Patch(color=color_a,
-                       label=f"{tp_a_str}  {sample_a}  (TF={tf_a:.1%})"),
-        mpatches.Patch(color=color_b,
-                       label=f"{tp_b_str}  {sample_b}  (TF={tf_b:.1%})"),
-        plt.Line2D([0], [0], color="#999999", linewidth=1,
-                   linestyle="-", label="log2R = 0"),
-    ]
-    if focal_regions:
-        top_handles.append(
-            mpatches.Patch(color="#b8860b", alpha=0.4,
-                           label="Focal amp (any timepoint)")
-        )
-    ax_top.legend(handles=top_handles, fontsize=8, loc="lower left",
-                  facecolor="white", edgecolor="#cccccc",
-                  labelcolor="#222222", framealpha=1.0)
-
-    # ── Bottom panel: differential ───────────────────────────────────────────
-    _style_ax(ax_bot)
-    ax_bot.axhline( 0,   color="#999999", linewidth=0.9, zorder=1)
-    ax_bot.axhline( 0.5, color="#cccccc", linewidth=0.4, linestyle=":", zorder=1)
-    ax_bot.axhline(-0.5, color="#cccccc", linewidth=0.4, linestyle=":", zorder=1)
-    _draw_focal_shading(ax_bot, delta_ylim)
-
-    if not diff.empty:
-        x_vals = diff.apply(
-            lambda r: _genome_x(r["chrom"], (r["start"] + r["end"]) / 2),
-            axis=1,
-        ).values
-        y_vals = np.clip(diff["delta_logr"].values, delta_ylim[0], delta_ylim[1])
-        colors = np.where(
-            y_vals >=  0.5, pal["gain"],
-            np.where(y_vals <= -0.5, pal["loss"], "#999999"),
-        )
-        ax_bot.scatter(x_vals, y_vals, s=3.0, c=colors, alpha=0.70,
-                       linewidths=0, zorder=3, rasterized=True)
-
-    ax_bot.set_ylim(delta_ylim)
-    ax_bot.set_ylabel(f"Δ log2 ratio\n({tp_b_str} − {tp_a_str})",
-                      fontsize=9, color="#444444", labelpad=5)
-    ax_bot.yaxis.set_major_locator(mticker.MultipleLocator(0.5))
-    ax_bot.yaxis.set_major_formatter(mticker.FormatStrFormatter("%.1f"))
-    ax_bot.text(GENOME_SIZE * 1.001,  0,    "0",     fontsize=7,
-                color="#888888", va="center")
-    ax_bot.text(GENOME_SIZE * 1.001,  0.5,  "+0.5",  fontsize=6,
-                color="#999999", va="center")
-    ax_bot.text(GENOME_SIZE * 1.001, -0.5,  "−0.5",  fontsize=6,
-                color="#999999", va="center")
-
-    bot_handles = [
-        mpatches.Patch(color=pal["gain"],  label=f"Gain in {tp_b_str}  (Δ > +0.5)"),
-        mpatches.Patch(color=pal["loss"],  label=f"Loss in {tp_b_str}  (Δ < −0.5)"),
-        mpatches.Patch(color="#999999",    label="Unchanged"),
-    ]
-    ax_bot.legend(handles=bot_handles, fontsize=8, loc="lower left",
-                  facecolor="white", edgecolor="#cccccc",
-                  labelcolor="#222222", framealpha=1.0)
-
-    fig.tight_layout()
-    _save(fig, output_path)
-
+    # ── Output ───────────────────────────────────────────────────────────────
+    if plot_raw:
+        _render(bins_a_raw, bins_b_raw, diff_raw, output_path, "raw")
+    _render(bins_a_s5,  bins_b_s5,  diff_s5,
+            output_path.with_name(output_path.name + "_smooth5"),
+            "5-bin smooth")
+    _render(bins_a_s10, bins_b_s10, diff_s10,
+            output_path.with_name(output_path.name + "_smooth10"),
+            "10-bin smooth")
 
 # ---------------------------------------------------------------------------
 # Batch: one combined plot per consecutive pair per patient
 # ---------------------------------------------------------------------------
 
 def plot_all_pairwise_longitudinal(
-        tf_df:          pd.DataFrame,
-        seg_files:      dict[str, Path],
-        output_dir:     Path,
-        min_tf:         float = 0.10,
-        logr_ylim:      tuple[float, float] = (-2.5, 2.5),
-        focal_tsv:      Path | None = None,
-        max_noise:      float | None = 0.15,
-        min_signal:     float | None = None,
-        seg_files_segs: dict[str, Path] | None = None,
+        tf_df:                pd.DataFrame,
+        seg_files:            dict[str, Path],
+        output_dir:           Path,
+        min_tf:               float = 0.10,
+        logr_ylim:            tuple[float, float] = (-2.5, 2.5),
+        focal_tsv:            Path | None = None,
+        max_noise:            float | None = 0.15,
+        min_signal:           float | None = None,
+        seg_files_segs:       dict[str, Path] | None = None,
+        min_altered_fraction: float = 0.05,
+        plot_raw:             bool  = False,
+        emergent_min_bins:    int   = 3,
+        emergent_min_delta:   float = 0.2,
+        emergent_tsv:         Path | None = None,
 ) -> int:
     """
     Generate one genome-wide log2-ratio comparison plot per consecutive
@@ -975,23 +1155,28 @@ def plot_all_pairwise_longitudinal(
                 continue
 
             plot_longitudinal_combined(
-                sample_a         = sa,
-                seg_path_a       = seg_files[sa],
-                tf_a             = tfa,
-                sample_b         = sb,
-                seg_path_b       = seg_files[sb],
-                tf_b             = tfb,
-                output_path      = output_path,
-                patient          = patient,
-                entity           = entity,
-                timepoint_a      = tpa,
-                timepoint_b      = tpb,
-                logr_ylim        = logr_ylim,
-                focal_tsv        = focal_tsv,
-                max_noise        = max_noise,
-                min_signal       = min_signal,
-                seg_path_a_segs  = seg_files_segs.get(sa) if seg_files_segs else None,
-                seg_path_b_segs  = seg_files_segs.get(sb) if seg_files_segs else None,
+                sample_a             = sa,
+                seg_path_a           = seg_files[sa],
+                tf_a                 = tfa,
+                sample_b             = sb,
+                seg_path_b           = seg_files[sb],
+                tf_b                 = tfb,
+                output_path          = output_path,
+                patient              = patient,
+                entity               = entity,
+                timepoint_a          = tpa,
+                timepoint_b          = tpb,
+                logr_ylim            = logr_ylim,
+                focal_tsv            = focal_tsv,
+                max_noise            = max_noise,
+                min_signal           = min_signal,
+                seg_path_a_segs      = seg_files_segs.get(sa) if seg_files_segs else None,
+                seg_path_b_segs      = seg_files_segs.get(sb) if seg_files_segs else None,
+                min_altered_fraction = min_altered_fraction,
+                plot_raw             = plot_raw,
+                emergent_min_bins    = emergent_min_bins,
+                emergent_min_delta   = emergent_min_delta,
+                emergent_tsv         = emergent_tsv,
             )
             n_plots += 1
             gc.collect()
@@ -1102,8 +1287,8 @@ def plot_differential_longitudinal(
           f"RMSE: {best_rmse:.4f}")
 
     # Per-sample signal metrics
-    q_a, n_above_a, noise_a = _signal_metrics(bins_a)
-    q_b, n_above_b, noise_b = _signal_metrics(bins_b)
+    q_a, n_above_a, noise_a, snr_a = _signal_metrics(bins_a)
+    q_b, n_above_b, noise_b, snr_b = _signal_metrics(bins_b)
     pair_noise = max(
         noise_a if not np.isnan(noise_a) else 0.0,
         noise_b if not np.isnan(noise_b) else 0.0,
@@ -1117,9 +1302,9 @@ def plot_differential_longitudinal(
               f"— skipping differential plot.")
         return
     if min_signal is not None:
-        if q_a < min_signal or q_b < min_signal:
-            print(f"        Signal p95 ({q_a:.3f}, {q_b:.3f}) below "
-                  f"min_signal {min_signal:.3f} — skipping differential plot.")
+        if snr_a < min_signal or snr_b < min_signal:
+            print(f"        SNR ({snr_a:.2f}, {snr_b:.2f}) below "
+                  f"min_signal {min_signal:.2f} — skipping differential plot.")
             return
 
     # Recompute aligned diff with the scaled bins

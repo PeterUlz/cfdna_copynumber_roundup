@@ -102,11 +102,25 @@ def _build_ichorcna_parser(sub: argparse._SubParsersAction) -> None:
                         "threshold are skipped (default 0.15). Set to 0 to "
                         "disable filtering.")
     p.add_argument("--min-signal", type=float, default=None,
-                   help="Minimum 95th percentile of |log2 ratio| for "
-                        "longitudinal plots. Samples where the p95 is below "
-                        "this value are considered flat (no visible SCNAs) "
-                        "and skipped (default: no filter). "
-                        "Suggested range: 0.10–0.20.")
+                   help="Minimum SNR (p95/noise) for longitudinal plots. "
+                        "Pairs below this threshold are skipped "
+                        "(default: no filter). Suggested: 1.5.")
+    p.add_argument("--min-altered-fraction", type=float, default=0.05,
+                   help="Minimum fraction of 50 kbp bins (after 10-bin "
+                        "smoothing) with |log2R| > 0.2 required for both "
+                        "samples in a longitudinal pair (default 0.05 = 5%%). "
+                        "Pairs where either sample falls below this are "
+                        "considered flat and skipped.")
+    p.add_argument("--plot-raw", action="store_true",
+                   help="Also output an unsmoothed longitudinal plot in "
+                        "addition to the 5-bin and 10-bin smoothed versions "
+                        "(default: off).")
+    p.add_argument("--emergent-min-bins", type=int, default=3,
+                   help="Minimum consecutive bins with |delta| > threshold "
+                        "to call an emergent CNA region (default 3).")
+    p.add_argument("--emergent-min-delta", type=float, default=0.2,
+                   help="Minimum |delta log2R| per bin to count toward "
+                        "an emergent CNA region (default 0.2).")
     # Annotation
     _add_cosmic_arg(p)
     p.set_defaults(func=_run_ichorcna)
