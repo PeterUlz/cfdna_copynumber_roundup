@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+from pathlib import Path
 
 
 def _add_cosmic_arg(p: argparse.ArgumentParser) -> None:
@@ -29,8 +30,13 @@ def _build_ichorcna_parser(sub: argparse._SubParsersAction) -> None:
         help="Analyze ichorCNA output directories.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
+    # Config file
+    p.add_argument("--config", default=None, metavar="FILE",
+                   help="YAML config file. CLI arguments override config values.")
+    p.add_argument("--write-config", default=None, metavar="FILE",
+                   help="Write a default config YAML to FILE and exit.")
     # Input
-    p.add_argument("--dir-1mb",  required=True,
+    p.add_argument("--dir-1mb",  default=None,
                    help="Directory containing ichorCNA 1 Mbp run output.")
     p.add_argument("--dir-50kb", required=True,
                    help="Directory containing ichorCNA 50 kbp run output.")
@@ -142,6 +148,11 @@ def _build_cbio_parser(sub: argparse._SubParsersAction) -> None:
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     # Input — built-in entities (semicolon-separated for multiple files)
+    # Config file
+    p.add_argument("--config", default=None, metavar="FILE",
+                   help="YAML config file. CLI arguments override config values.")
+    p.add_argument("--write-config", default=None, metavar="FILE",
+                   help="Write a default config YAML to FILE and exit.")
     p.add_argument("--breast",     default=None,
                    help="Breast cancer .seg file(s), semicolon-separated.")
     p.add_argument("--prostate",   default=None,
@@ -197,6 +208,11 @@ def _build_cbio_parser(sub: argparse._SubParsersAction) -> None:
     p.set_defaults(func=_run_cbio)
 
 
+def _run_ichorcna(args: argparse.Namespace) -> None:
+    from .commands.ichorcna_cmd import run
+    run(args)
+
+
 def _run_cbio(args: argparse.Namespace) -> None:
     from .commands.cbio_cmd import run
     run(args)
@@ -218,6 +234,31 @@ def main() -> None:
     _build_cbio_parser(sub)
 
     args = parser.parse_args()
+
+    # ── --write-config: dump default and exit ────────────────────────────────
+    if getattr(args, "write_config", None):
+        from .config import write_default_config
+        write_default_config(Path(args.write_config), args.command)
+        sys.exit(0)
+
+    # ── --config: load YAML and apply values not set on the CLI ─────────────
+    if getattr(args, "config", None):
+        from .config import load_config, apply_config_to_namespace
+        cfg      = load_config(Path(args.config))
+        sub_parser = sub._name_parser_map[args.command]
+        args     = apply_config_to_namespace(args, cfg, sub_parser)
+
+    # ── Validate required args after config merge ────────────────────────────
+    if args.command == "ichorcna":
+        missing = [f"--{f.replace('_', '-')}"
+                   for f in ("dir_1mb", "dir_50kb")
+                   if not getattr(args, f, None)]
+        if missing:
+            parser.error(
+                f"The following arguments are required (or set in --config): "
+                f"{', '.join(missing)}"
+            )
+
     args.func(args)
 
 

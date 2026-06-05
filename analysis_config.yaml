@@ -1,0 +1,54 @@
+# cfdna-cnv ichorcna configuration
+# =================================
+# Generate this file with:  cfdna-cnv ichorcna --write-config analysis.yaml
+# Run with:                 cfdna-cnv ichorcna --config analysis.yaml
+#
+# CLI arguments always override values here, e.g.:
+#   cfdna-cnv ichorcna --config analysis.yaml --tf-threshold 0.05
+
+# ── Input / output ──────────────────────────────────────────────────────────
+dir-1mb:  /path/to/ichorCNA_1Mbp_output    # required
+dir-50kb: /path/to/ichorCNA_50kbp_output   # required
+output:   ichorcna_results
+
+# ── Sample filtering ─────────────────────────────────────────────────────────
+tf:
+  threshold:  0.03        # Minimum tumor fraction (3%)
+  min-reads:  1000000     # Minimum total reads from WIG file
+  # exclude-entities: [Lung, Ovarian]  # Remove small entity cohorts
+
+# ── Copy-number thresholds ───────────────────────────────────────────────────
+amp:
+  min-cn: 4               # Min CN for focal amp (excludes GAIN/CN=3)
+
+log2:
+  delta: 0.2              # Min log2 elevation above background (abs + relative)
+
+# ── Focal amplification detection ───────────────────────────────────────────
+focal:
+  min-bp:               50000   # Minimum segment size (50 kbp)
+  max-bp:               500000  # Maximum segment size (500 kbp)
+  min-bins:             3       # Minimum 50 kbp bins in segment (≥ 150 kbp)
+  flank-bins:           2       # Background window: 2 × 1 Mbp on each side
+  noise-factor:         2.0     # Segment logR must be ≥ noise_factor × noise
+  max-focal-per-sample: 5       # Discard samples with > N focal amps
+  freq-min-freq:        0.0     # Min patient frequency for frequency plot
+  amp-diagnostics:      false   # Generate per-sample diagnostic plots
+
+# ── Broad CNA plot ───────────────────────────────────────────────────────────
+plot:
+  bin-size: 5000000       # Genomic bin size for broad CNA frequency plot (5 Mbp)
+
+# ── COSMIC annotation ────────────────────────────────────────────────────────
+# cosmic-cgc: /path/to/Census_allThu.tsv
+
+# ── Longitudinal plots ───────────────────────────────────────────────────────
+longitudinal:
+  plots:                true    # Enable longitudinal comparison plots
+  # plot-dir: null              # Output dir (default: <output>/longitudinal_plots)
+  max-noise:            0.15    # Max neighbour noise; noisier pairs are skipped
+  min-signal:           null    # Min SNR (p95/noise); null = disabled
+  min-altered-fraction: 0.05    # Min fraction of bins with |logR| > 0.2
+  plot-raw:             false   # Also output unsmoothed plots
+  emergent-min-bins:    3       # Min consecutive bins to call emergent CNA
+  emergent-min-delta:   0.5     # Min |delta log2R| per bin for emergent CNA
