@@ -118,9 +118,9 @@ def _build_ichorcna_parser(sub: argparse._SubParsersAction) -> None:
     p.add_argument("--emergent-min-bins", type=int, default=3,
                    help="Minimum consecutive bins with |delta| > threshold "
                         "to call an emergent CNA region (default 3).")
-    p.add_argument("--emergent-min-delta", type=float, default=0.2,
+    p.add_argument("--emergent-min-delta", type=float, default=0.5,
                    help="Minimum |delta log2R| per bin to count toward "
-                        "an emergent CNA region (default 0.2).")
+                        "an emergent CNA region (default 0.5).")
     # Annotation
     _add_cosmic_arg(p)
     p.set_defaults(func=_run_ichorcna)

@@ -774,28 +774,31 @@ def plot_longitudinal_combined(
         min_altered_fraction: float = 0.05,
         plot_raw:             bool  = False,
         emergent_min_bins:    int   = 3,
-        emergent_min_delta:   float = 0.2,
+        emergent_min_delta:   float = 0.5,
         emergent_tsv:         Path | None = None,
 ) -> None:
     """
-    Two-panel longitudinal comparison with 10-bin smoothing as the primary
-    processing step.
+    Two-panel longitudinal comparison. Scaling is computed on raw bins
+    and applied before smoothing, so the smoothed profiles reflect the
+    correctly scaled signal.
 
     Pipeline
     --------
     1. Load raw 50 kbp bin-level logR.
-    2. Apply 10-bin running mean smoothing.
-    3. Filter: fraction of bins with |logR| > 0.2 must exceed
+    2. Filter: fraction of raw bins with |logR| > 0.2 must exceed
        min_altered_fraction for both samples (default 5 %).
-    4. Compute neighbour-noise and SNR filters on smoothed profiles.
-    5. Compute TF scaling on the 10-bin-smoothed profiles.
-    6. Build 5-bin and 10-bin differentials.
-    7. Detect emergent CNA regions (>= emergent_min_bins consecutive bins
+    3. Compute neighbour-noise filter on raw bins.
+    4. Compute TF scaling on raw profiles (using seg means for the fit).
+    5. Apply scale to raw bins.
+    6. Smooth scaled raw bins → 5-bin and 10-bin versions.
+    7. Compute SNR filter on 10-bin-smoothed profiles.
+    8. Build 5-bin and 10-bin differentials.
+    9. Detect emergent CNA regions (>= emergent_min_bins consecutive bins
        with |delta| > emergent_min_delta).
-    8. Output:
-         - 5-bin smoothed plot  (always)
-         - 10-bin smoothed plot (always)
-         - raw plot             (only if plot_raw=True)
+    10. Output:
+          - 5-bin smoothed plot  (always)
+          - 10-bin smoothed plot (always)
+          - raw plot             (only if plot_raw=True)
     """
     pal     = ICHORCNA_ENTITY_PALETTE.get(entity, ICHORCNA_ENTITY_PALETTE["Other"])
     color_a = "#888888"
@@ -829,17 +832,13 @@ def plot_longitudinal_combined(
         out[col] = smoothed
         return out
 
-    # ── 10-bin smoothing for filtering + scaling ─────────────────────────────
-    bins_a_s10 = _smooth(bins_a_raw, 10)
-    bins_b_s10 = _smooth(bins_b_raw, 10)
-
-    # ── Filter 1: altered bin fraction ──────────────────────────────────────
+    # ── Filter 1: altered bin fraction (on raw bins) ────────────────────────
     def _altered_frac(df: pd.DataFrame) -> float:
         v = df["logr_corrected"].dropna().values
         return float(np.mean(np.abs(v) > 0.2)) if len(v) else 0.0
 
-    frac_a = _altered_frac(bins_a_s10)
-    frac_b = _altered_frac(bins_b_s10)
+    frac_a = _altered_frac(bins_a_raw)
+    frac_b = _altered_frac(bins_b_raw)
 
     if min_altered_fraction > 0 and (frac_a < min_altered_fraction or
                                       frac_b < min_altered_fraction):
@@ -856,7 +855,40 @@ def plot_longitudinal_combined(
         print(f"        Pair noise {pair_noise:.4f} > {max_noise:.4f} — skipping.")
         return
 
-    # ── Signal metrics on smoothed bins ─────────────────────────────────────
+    # ── TF scaling on raw profiles (using seg means for the fit) ─────────────
+    if seg_path_a_segs is not None and seg_path_b_segs is not None:
+        _seg_a = _load_bins_with_seg_means(seg_path_a, seg_path_a_segs,
+                                           sample_a, tf_a)
+        _seg_b = _load_bins_with_seg_means(seg_path_b, seg_path_b_segs,
+                                           sample_b, tf_b)
+        seg_a = _seg_a if _seg_a is not None else bins_a_raw
+        seg_b = _seg_b if _seg_b is not None else bins_b_raw
+    else:
+        seg_a, seg_b = bins_a_raw, bins_b_raw
+
+    aligned = _align_bins(seg_a, seg_b)
+    if aligned.empty:
+        print("      [WARN] No overlapping bins — skipping.")
+        return
+
+    if tf_a >= tf_b:
+        best_m, _ = _optimise_scaling(
+            aligned["logr_a"].values, aligned["logr_b"].values)
+        def _scale(df): out=df.copy(); out["logr_corrected"]*=best_m; return out
+        bins_b_raw = _scale(bins_b_raw)
+    else:
+        best_m, _ = _optimise_scaling(
+            aligned["logr_b"].values, aligned["logr_a"].values)
+        def _scale(df): out=df.copy(); out["logr_corrected"]*=best_m; return out
+        bins_a_raw = _scale(bins_a_raw)
+
+    # ── Smooth scaled raw bins ───────────────────────────────────────────────
+    bins_a_s5  = _smooth(bins_a_raw,  5)
+    bins_b_s5  = _smooth(bins_b_raw,  5)
+    bins_a_s10 = _smooth(bins_a_raw, 10)
+    bins_b_s10 = _smooth(bins_b_raw, 10)
+
+    # ── Signal metrics on smoothed bins (for title / SNR filter) ────────────
     q_a, n_above_a, _, snr_a = _signal_metrics(bins_a_s10)
     q_b, n_above_b, _, snr_b = _signal_metrics(bins_b_s10)
     print(f"        {sample_a}: noise={noise_a:.4f}  p95={q_a:.3f}  "
@@ -868,36 +900,6 @@ def plot_longitudinal_combined(
         print(f"        SNR ({snr_a:.2f}, {snr_b:.2f}) < "
               f"{min_signal:.2f} — skipping.")
         return
-
-    # ── TF scaling on 10-bin-smoothed profiles ───────────────────────────────
-    if seg_path_a_segs is not None and seg_path_b_segs is not None:
-        seg_a_s10 = _smooth(_load_bins_with_seg_means(
-                        seg_path_a, seg_path_a_segs, sample_a, tf_a), 10)                     or bins_a_s10
-        seg_b_s10 = _smooth(_load_bins_with_seg_means(
-                        seg_path_b, seg_path_b_segs, sample_b, tf_b), 10)                     or bins_b_s10
-    else:
-        seg_a_s10, seg_b_s10 = bins_a_s10, bins_b_s10
-
-    aligned = _align_bins(seg_a_s10, seg_b_s10)
-    if aligned.empty:
-        print("      [WARN] No overlapping bins — skipping.")
-        return
-
-    if tf_a >= tf_b:
-        best_m, _ = _optimise_scaling(
-            aligned["logr_a"].values, aligned["logr_b"].values)
-        def _scale(df): out=df.copy(); out["logr_corrected"]*=best_m; return out
-        bins_b_raw = _scale(bins_b_raw)
-        bins_b_s10 = _scale(bins_b_s10)
-    else:
-        best_m, _ = _optimise_scaling(
-            aligned["logr_b"].values, aligned["logr_a"].values)
-        def _scale(df): out=df.copy(); out["logr_corrected"]*=best_m; return out
-        bins_a_raw = _scale(bins_a_raw)
-        bins_a_s10 = _scale(bins_a_s10)
-
-    bins_a_s5 = _smooth(bins_a_raw, 5)
-    bins_b_s5 = _smooth(bins_b_raw, 5)
 
     # ── Build differentials ──────────────────────────────────────────────────
     def _diff(ba, bb):
@@ -1077,7 +1079,7 @@ def plot_all_pairwise_longitudinal(
         min_altered_fraction: float = 0.05,
         plot_raw:             bool  = False,
         emergent_min_bins:    int   = 3,
-        emergent_min_delta:   float = 0.2,
+        emergent_min_delta:   float = 0.5,
         emergent_tsv:         Path | None = None,
 ) -> int:
     """
