@@ -1521,3 +1521,306 @@ def plot_all_differential_longitudinal(
             gc.collect()
 
     return n_plots
+
+
+# ---------------------------------------------------------------------------
+# Focal amplification trajectories — relative CN across timepoints
+# ---------------------------------------------------------------------------
+
+def _region_label(region: dict) -> str:
+    """
+    Human-readable label for a focal amp region: first COSMIC gene name if
+    available, otherwise the genomic coordinates in Mb.
+    """
+    genes = str(region.get("cosmic_genes", "")).strip()
+    if genes and genes.lower() != "nan":
+        return genes.split(",")[0].strip()
+    chrom    = region["chrom"]
+    start_mb = region["start"] / 1_000_000
+    end_mb   = region["end"] / 1_000_000
+    return f"{chrom}:{start_mb:.2f}-{end_mb:.2f}Mb"
+
+
+def _region_logr_stats(bins_df: pd.DataFrame, region: dict) -> tuple[float, float, float]:
+    """
+    Mean, Q1, and Q3 of the TF-corrected log2 ratio of all 50 kbp bins
+    overlapping a focal amp region. Returns (nan, nan, nan) if no bins
+    overlap.
+
+    The (Q1, Q3) interquartile range serves as a measure of variation
+    across the bins comprising the region — wide segments with many bins
+    give a tighter range, very small segments (few bins) naturally have
+    a wider or degenerate (Q1==Q3) range.
+    """
+    chrom = region["chrom"]
+    s, e  = region["start"], region["end"]
+    sub = bins_df[
+        (bins_df["chrom"] == chrom) &
+        (bins_df["end"]   > s) &
+        (bins_df["start"] < e)
+    ]
+    if sub.empty:
+        return float("nan"), float("nan"), float("nan")
+    vals = sub["logr_corrected"].values
+    mean = float(np.mean(vals))
+    q1   = float(np.percentile(vals, 25))
+    q3   = float(np.percentile(vals, 75))
+    return mean, q1, q3
+
+
+def _trajectory_palette(n: int) -> list:
+    """Return n visually distinct colours for line plots."""
+    if n <= 10:
+        cmap = plt.colormaps.get_cmap("tab10")
+        return [cmap(i) for i in range(n)]
+    if n <= 20:
+        cmap = plt.colormaps.get_cmap("tab20")
+        return [cmap(i) for i in range(n)]
+    cmap = plt.colormaps.get_cmap("hsv")
+    return [cmap(i / n) for i in range(n)]
+
+
+def plot_focal_amp_trajectories(
+        patient:        str,
+        entity:         str,
+        samples:        list[str],
+        timepoints:     list[int],
+        tfs:            list[float],
+        seg_files_bins: dict[str, Path],
+        focal_regions:  list[dict],
+        output_dir:     Path,
+) -> bool:
+    """
+    For one patient, plot the relative copy-number trajectory of each focal
+    amplification region across timepoints as line plots.
+
+    Two figures are written:
+      <patient>_focal_amp_trajectory_log2.pdf/.png
+          y-axis: TF-corrected log2 ratio (scaled to the patient's
+          highest-TF timepoint), one line per focal amp region.
+      <patient>_focal_amp_trajectory_cn.pdf/.png
+          y-axis: relative copy number = 2 * 2^(log2 ratio), same scaling.
+
+    Each point is the mean over the 50 kbp bins overlapping the region;
+    error bars show the interquartile range (Q1-Q3) of those bins, giving
+    a sense of within-segment variation/noise at each timepoint. Regions
+    spanning very few bins will have narrow or degenerate (zero-length)
+    error bars.
+
+    Each focal amp region (merged across all of the patient's timepoints)
+    gets its own colour, consistent between the two plots.
+
+    Returns True if plots were written, False if there was nothing to plot
+    (fewer than 2 timepoints, no focal regions, or no bin data available).
+    """
+    if len(samples) < 2 or not focal_regions:
+        return False
+
+    ref_tf = max(tfs)
+    if ref_tf <= 0:
+        return False
+
+    # ── Region labels (unique) ───────────────────────────────────────────
+    labels: list[str] = []
+    seen: dict[str, int] = {}
+    for region in focal_regions:
+        lbl = _region_label(region)
+        if lbl in seen:
+            seen[lbl] += 1
+            lbl = f"{lbl} ({seen[lbl]})"
+        else:
+            seen[lbl] = 0
+        labels.append(lbl)
+
+    # ── Per-sample, per-region mean logR + IQR (scaled to ref_tf) ────────
+    log2_matrix = np.full((len(samples), len(focal_regions)), np.nan)
+    log2_q1     = np.full((len(samples), len(focal_regions)), np.nan)
+    log2_q3     = np.full((len(samples), len(focal_regions)), np.nan)
+    for i, (sample, tf) in enumerate(zip(samples, tfs)):
+        seg_path = seg_files_bins.get(sample)
+        if seg_path is None:
+            continue
+        bins_df = _load_bins(seg_path, sample, tf_from=tf, tf_to=ref_tf)
+        if bins_df is None or bins_df.empty:
+            continue
+        for j, region in enumerate(focal_regions):
+            mean, q1, q3 = _region_logr_stats(bins_df, region)
+            log2_matrix[i, j] = mean
+            log2_q1[i, j]     = q1
+            log2_q3[i, j]     = q3
+
+    if np.all(np.isnan(log2_matrix)):
+        return False
+
+    cn_matrix = 2.0 * np.power(2.0, log2_matrix)
+    # 2^x is monotonic, so percentile bounds carry over directly
+    cn_q1 = 2.0 * np.power(2.0, log2_q1)
+    cn_q3 = 2.0 * np.power(2.0, log2_q3)
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    colors    = _trajectory_palette(len(focal_regions))
+    x         = timepoints
+    tp_labels = [f"TP{tp}" for tp in timepoints]
+
+    title_main = f"{patient}  ({entity})   Focal amplification trajectories"
+    title_sub  = "   ".join(
+        f"TP{tp} (TF={tf:.1%})" for tp, tf in zip(timepoints, tfs)
+    ) + f"     [scaled to TF={ref_tf:.1%}; error bars = IQR of bins in segment]"
+
+    def _new_axes():
+        fig, ax = plt.subplots(figsize=(8.5, 5.0), facecolor="white")
+        ax.set_facecolor("white")
+        for spine in ax.spines.values():
+            spine.set_edgecolor("#cccccc")
+            spine.set_linewidth(0.6)
+        ax.set_xticks(x)
+        ax.set_xticklabels(tp_labels)
+        ax.set_xlabel("Timepoint", fontsize=9, color="#444444")
+        ax.set_title(f"{title_main}\n{title_sub}", fontsize=10,
+                      fontweight="bold", color="#222222", loc="left")
+        return fig, ax
+
+    def _plot_lines(ax, matrix, q1_matrix, q3_matrix):
+        for j, (label, color) in enumerate(zip(labels, colors)):
+            yv  = matrix[:, j]
+            lo  = yv - q1_matrix[:, j]
+            hi  = q3_matrix[:, j] - yv
+            # Clip negative error magnitudes from NaNs/edge cases
+            lo  = np.clip(lo, 0, None)
+            hi  = np.clip(hi, 0, None)
+            ax.errorbar(x, yv, yerr=[lo, hi], fmt="o-", linewidth=1.8,
+                         markersize=5, color=color, label=label,
+                         ecolor=color, elinewidth=1.0, capsize=3,
+                         alpha=0.95, zorder=3)
+        ax.legend(fontsize=7, loc="center left", bbox_to_anchor=(1.01, 0.5),
+                  frameon=True, facecolor="white", edgecolor="#cccccc",
+                  labelcolor="#222222")
+
+    # ── Log2-space plot ───────────────────────────────────────────────────
+    fig, ax = _new_axes()
+    ax.axhline(0,    color="#999999", linewidth=0.8, linestyle="-",  zorder=1)
+    for ref in (0.58, -0.58, 1.0, -1.0):
+        ax.axhline(ref, color="#cccccc", linewidth=0.5, linestyle=":", zorder=1)
+    _plot_lines(ax, log2_matrix, log2_q1, log2_q3)
+    ax.set_ylabel("TF-corrected log2 ratio\n(focal amplification region)",
+                   fontsize=9, color="#444444")
+    fig.tight_layout()
+    _save(fig, output_dir / f"{patient}_focal_amp_trajectory_log2")
+
+    # ── Relative copy-number plot ────────────────────────────────────────
+    fig, ax = _new_axes()
+    ax.axhline(2, color="#999999", linewidth=0.8, linestyle="-", zorder=1)
+    for ref in (1, 3, 4, 6, 8):
+        ax.axhline(ref, color="#cccccc", linewidth=0.5, linestyle=":", zorder=1)
+    _plot_lines(ax, cn_matrix, cn_q1, cn_q3)
+    ax.set_ylabel("Relative copy number\n"
+                   r"(2 $\times$ 2$^{\mathrm{log2ratio}}$, scaled)",
+                   fontsize=9, color="#444444")
+    ax.set_ylim(bottom=0)
+    fig.tight_layout()
+    _save(fig, output_dir / f"{patient}_focal_amp_trajectory_cn")
+
+    return True
+
+
+def plot_all_focal_amp_trajectories(
+        focal_tsv:      Path,
+        tf_df:          pd.DataFrame,
+        seg_files_bins: dict[str, Path],
+        output_dir:     Path,
+        min_tf:         float = 0.10,
+        min_timepoints: int   = 2,
+) -> int:
+    """
+    Batch driver: for every patient with >= min_timepoints qualifying
+    timepoints AND at least one focal amplification event (in any of their
+    samples), generate the log2 and relative-CN trajectory plots.
+
+    Parameters
+    ----------
+    focal_tsv      : path to focal_amplifications.tsv.
+    tf_df          : tumor fraction table (sample, patient, timepoint,
+                     tumor_fraction).
+    seg_files_bins : {sample: Path} to 50 kbp .cna.seg bin-level files.
+    output_dir     : directory for the trajectory plots.
+    min_tf         : minimum tumor fraction for a timepoint to be included
+                     (default 0.10 = 10%; samples below this are dropped
+                     from the trajectory entirely).
+    min_timepoints : minimum number of qualifying timepoints per patient.
+
+    Returns
+    -------
+    Number of patients for which plots were generated.
+    """
+    if not focal_tsv.exists() or focal_tsv.stat().st_size == 0:
+        print("        No focal_amplifications.tsv — skipping trajectories.")
+        return 0
+
+    try:
+        focal_df = pd.read_csv(focal_tsv, sep="\t", low_memory=False)
+    except Exception as e:
+        print(f"        [WARN] Could not read {focal_tsv}: {e}")
+        return 0
+
+    if focal_df.empty or "sample" not in focal_df.columns:
+        return 0
+
+    focal_df = focal_df.copy()
+    focal_df["chrom"] = focal_df["chrom"].astype(str).apply(
+        lambda c: c if c.startswith("chr") else f"chr{c}")
+    if "cosmic_genes" not in focal_df.columns:
+        focal_df["cosmic_genes"] = ""
+    focal_df["cosmic_genes"] = focal_df["cosmic_genes"].fillna("").astype(str)
+    focal_df.loc[focal_df["cosmic_genes"].str.lower() == "nan", "cosmic_genes"] = ""
+
+    focal_samples = set(focal_df["sample"].unique())
+
+    df = tf_df.dropna(subset=["timepoint", "tumor_fraction"]).copy()
+    df = df[df["tumor_fraction"] >= min_tf]
+    df["timepoint"] = df["timepoint"].astype(int)
+    df = df[df["sample"].isin(seg_files_bins)]
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    n_plots = 0
+
+    for patient, pat_df in df.groupby("patient"):
+        pat_df = pat_df.sort_values("timepoint")
+        if pat_df["timepoint"].nunique() < min_timepoints:
+            continue
+
+        pat_samples = set(pat_df["sample"])
+        if not (pat_samples & focal_samples):
+            continue
+
+        pat_focal = focal_df[focal_df["sample"].isin(pat_samples)]
+        regions = [
+            {
+                "chrom":        row["chrom"],
+                "start":        int(row["start"]),
+                "end":          int(row["end"]),
+                "cosmic_genes": row["cosmic_genes"],
+            }
+            for _, row in pat_focal.iterrows()
+        ]
+        regions = _merge_overlapping(regions)
+        if not regions:
+            continue
+
+        entity = entity_from_sample(str(patient))
+        ok = plot_focal_amp_trajectories(
+            patient        = str(patient),
+            entity         = entity,
+            samples        = pat_df["sample"].tolist(),
+            timepoints     = pat_df["timepoint"].tolist(),
+            tfs            = pat_df["tumor_fraction"].tolist(),
+            seg_files_bins = seg_files_bins,
+            focal_regions  = regions,
+            output_dir     = output_dir,
+        )
+        if ok:
+            n_plots += 1
+            print(f"        {patient}: {len(regions)} focal amp region(s) "
+                  f"across {pat_df['timepoint'].nunique()} timepoints")
+        gc.collect()
+
+    return n_plots

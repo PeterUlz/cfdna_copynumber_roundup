@@ -21,6 +21,7 @@ from ..ichorcna.focal_amp_plots import plot_all_focal_amp_diagnostics
 from ..ichorcna.longitudinal_plots import (
     plot_all_pairwise_longitudinal,
     plot_longitudinal_combined,
+    plot_all_focal_amp_trajectories,
 )
 from ..ichorcna.plots import (
     plot_broad_cna_frequencies,
@@ -474,6 +475,21 @@ def run(args: argparse.Namespace) -> None:
 
         # Note: differential plot is now included as the bottom panel
         # of the combined plot above — no separate differential plots needed.
+
+        # Focal amplification trajectory plots (one pair of plots per
+        # patient with >= 2 timepoints and at least one focal amp event)
+        print(f"      Generating focal amplification trajectory plots ...")
+        focal_traj_dir = longit_plot_dir / "focal_amp_trajectories"
+        n_traj = plot_all_focal_amp_trajectories(
+            focal_tsv      = outdir / "focal_amplifications.tsv",
+            tf_df          = _tf_for_longit,
+            seg_files_bins = seg_50k_bins,
+            output_dir     = focal_traj_dir,
+            min_tf         = 0.10,
+            min_timepoints = 2,
+        )
+        print(f"      Generated {n_traj} focal amp trajectory plot pair(s) "
+              f"→ {focal_traj_dir}")
 
     # ── Summary ──────────────────────────────────────────────────────────────
 
