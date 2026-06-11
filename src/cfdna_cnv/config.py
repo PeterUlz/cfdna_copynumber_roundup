@@ -30,10 +30,20 @@ _ALIASES: dict[str, str] = {
     "longitudinal-plot-raw":             "plot_raw",
     "longitudinal-emergent-min-bins":    "emergent_min_bins",
     "longitudinal-emergent-min-delta":   "emergent_min_delta",
+    "longitudinal-no-clean-plots":       "no_clean_plots",
     "amp-min-cn":                        "amp_min_cn",
     "log2-delta":                        "log2_delta",
     "plot-bin-size":                     "plot_bin_size",
     "cosmic-cgc":                        "cosmic_cgc",
+    "liquidcna-functions":               "liquidcna_functions",
+    "liquidcna-min-tf":                  "liquidcna_min_tf",
+    "liquidcna-min-timepoints":          "liquidcna_min_timepoints",
+    "liquidcna-no-run":                  "liquidcna_no_run",
+    "sigminer-ref":                      "sigminer_ref",
+    "sigminer-min-tf":                   "sigminer_min_tf",
+    "sigminer-genome":                   "sigminer_genome",
+    "sigminer-cores":                    "sigminer_cores",
+    "sigminer-no-run":                   "sigminer_no_run",
 }
 
 
@@ -144,6 +154,22 @@ plot:
 # ── COSMIC annotation ────────────────────────────────────────────────────────
 # cosmic-cgc: /path/to/Census_allThu.tsv
 
+# ── Sigminer CN signatures ───────────────────────────────────────────────────
+sigminer: false                   # Set to true to enable
+sigminer-ref: [CNS_TCGA]  # Only CNS_TCGA works without minor_cn (LOH)
+                               # CNS_TCGA/CNS_TCGA176/CNS_PCAWG176 require LOH
+sigminer-min-tf:      0.15        # Min TF for samples (15%)
+sigminer-genome:      hg38        # hg38 or hg19
+sigminer-cores:       1           # Parallel cores
+sigminer-no-run:      false       # Prepare R script but don't execute
+
+# ── LiquidCNA subclonal evolution ────────────────────────────────────────────
+liquidcna: false              # Set to true to enable
+# liquidcna-functions: /path/to/mixture_estimation_functions.R  # required
+liquidcna-min-tf:           0.20  # Min TF to include in liquidCNA (20%)
+liquidcna-min-timepoints:   2     # Min qualifying timepoints per patient
+liquidcna-no-run:           false # Prepare inputs but don't execute Rscript
+
 # ── Longitudinal plots ───────────────────────────────────────────────────────
 longitudinal:
   plots:                true    # Enable longitudinal comparison plots
@@ -154,6 +180,7 @@ longitudinal:
   plot-raw:             false   # Also output unsmoothed plots
   emergent-min-bins:    3       # Min consecutive bins to call emergent CNA
   emergent-min-delta:   0.5     # Min |delta log2R| per bin for emergent CNA
+  no-clean-plots:       false   # Set true to skip 'clean' figure-ready plots
 """
 
 _CBIO_DEFAULT_CONFIG = """\

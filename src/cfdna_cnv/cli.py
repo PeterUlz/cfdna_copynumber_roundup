@@ -127,16 +127,23 @@ def _build_ichorcna_parser(sub: argparse._SubParsersAction) -> None:
     p.add_argument("--emergent-min-delta", type=float, default=0.5,
                    help="Minimum |delta log2R| per bin to count toward "
                         "an emergent CNA region (default 0.5).")
+    p.add_argument("--no-clean-plots", action="store_true",
+                   help="Disable generation of 'clean' publication-style "
+                        "longitudinal plots (overlaid + differential panels "
+                        "only, fixed gain/loss colour scheme, no focal-amp "
+                        "shading), written to <plot_dir>/clean/. "
+                        "Default: clean plots are generated.")
     # Sigminer CN signatures
     p.add_argument("--sigminer", action="store_true",
                    help="Run sigminer CN signature analysis.")
     p.add_argument("--sigminer-ref", nargs="+",
-                   default=["CNS_TCGA", "CNS_PCAWG176"],
+                   default=["CNS_USARC"],
                    metavar="REF",
                    help="Reference signature set(s) to fit against. "
-                        "Built-in options: CNS_TCGA (48 cat), "
-                        "CNS_PCAWG176 (176 cat), CNS_TCGA176 (176 cat), "
-                        "CNS_USARC (40 cat). Default: CNS_TCGA CNS_PCAWG176.")
+                        "Built-in option compatible with ichorCNA (no LOH required): "
+                        "CNS_USARC (40 cat). "
+                        "CNS_TCGA/CNS_TCGA176/CNS_PCAWG176 require minor_cn "
+                        "which ichorCNA does not provide. Default: CNS_USARC.")
     p.add_argument("--sigminer-min-tf", type=float, default=0.15,
                    help="Minimum TF for sigminer samples (default 0.15 = 15%%).")
     p.add_argument("--sigminer-genome", default="hg38",
@@ -144,6 +151,9 @@ def _build_ichorcna_parser(sub: argparse._SubParsersAction) -> None:
                    help="Reference genome for sigminer (default hg38).")
     p.add_argument("--sigminer-cores", type=int, default=1,
                    help="Parallel cores for sigminer (default 1).")
+    p.add_argument("--sigminer-n-sig", type=int, default=6,
+                   help="Number of de novo CN signatures to extract (default 6). "
+                        "Typical range: 4-10.")
     p.add_argument("--sigminer-no-run", action="store_true",
                    help="Prepare sigminer inputs and R script but do not "
                         "execute Rscript.")

@@ -463,8 +463,9 @@ def run(args: argparse.Namespace) -> None:
             min_altered_fraction = getattr(args, "min_altered_fraction", 0.05),
             plot_raw             = getattr(args, "plot_raw", False),
             emergent_min_bins    = getattr(args, "emergent_min_bins", 3),
-            emergent_min_delta   = getattr(args, "emergent_min_delta", 0.2),
+            emergent_min_delta   = getattr(args, "emergent_min_delta", 0.5),
             emergent_tsv         = _emergent_tsv,
+            clean_plots          = not getattr(args, "no_clean_plots", False),
         )
         if _emergent_tsv.exists() and _emergent_tsv.stat().st_size > 0:
             n_emerg = sum(1 for _ in open(_emergent_tsv)) - 1
@@ -585,17 +586,20 @@ def run(args: argparse.Namespace) -> None:
         from ..sigminer import run_sigminer
         sig_dir = outdir / "sigminer"
         print(f"\n[Sigminer] CN signature analysis → {sig_dir}")
+        _sig_refs = getattr(args, "sigminer_ref", ["CNS_TCGA", "CNS_PCAWG176"])
+        if isinstance(_sig_refs, str):
+            _sig_refs = [_sig_refs]
         run_sigminer(
-            tf_df=tf_df,
-            seg_files=seg_1mb_files,
-            output_dir=sig_dir,
-            ref_sets=getattr(args, "sigminer_ref",
-                             ["CNS_TCGA", "CNS_PCAWG176"]),
-            min_tf=getattr(args, "sigminer_min_tf", 0.15),
-            genome=getattr(args, "sigminer_genome", "hg38"),
-            cores=getattr(args, "sigminer_cores", 1),
-            rscript_bin=getattr(args, "rscript", "Rscript"),
-            run_r=not getattr(args, "sigminer_no_run", False),
+            tf_df       = tf_df,
+            seg_files   = seg_1mb_files,
+            output_dir  = sig_dir,
+            ref_sets    = _sig_refs,
+            min_tf      = getattr(args, "sigminer_min_tf", 0.15),
+            genome      = getattr(args, "sigminer_genome", "hg38"),
+            cores       = getattr(args, "sigminer_cores", 1),
+            n_sig_max   = getattr(args, "sigminer_n_sig", 6),
+            rscript_bin = getattr(args, "rscript", "Rscript"),
+            run_r       = not getattr(args, "sigminer_no_run", False),
         )
 
     # ── LiquidCNA ──────────────────────────────────────────────────────────

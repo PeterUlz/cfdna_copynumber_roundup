@@ -33,7 +33,7 @@ focal:
   noise-factor:         2.0     # Segment logR must be ≥ noise_factor × noise
   max-focal-per-sample: 50       # Discard samples with > N focal amps
   freq-min-freq:        0.0     # Min patient frequency for frequency plot
-  amp-diagnostics:      false #true   # Generate per-sample diagnostic plots
+  amp-diagnostics:      true #true   # Generate per-sample diagnostic plots
 
 # ── Broad CNA plot ───────────────────────────────────────────────────────────
 plot:
@@ -59,7 +59,7 @@ sigminer-no-run:      false       # Prepare R script but don't execute
 
 # ── Longitudinal plots ───────────────────────────────────────────────────────
 longitudinal:
-  plots:                false # true    # Enable longitudinal comparison plots
+  plots:                true # true    # Enable longitudinal comparison plots
   # plot-dir: null              # Output dir (default: <output>/longitudinal_plots)
   max-noise:            0.35    # Max neighbour noise; noisier pairs are skipped
   min-signal:           null    # Min SNR (p95/noise); null = disabled
