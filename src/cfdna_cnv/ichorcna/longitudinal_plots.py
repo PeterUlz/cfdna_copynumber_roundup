@@ -40,6 +40,10 @@ from .plots import (
     _style_ax, _genome_x, _save,
 )
 
+# Fixed colour scheme for the "clean" publication-style longitudinal plots.
+# Used consistently across all entities (no per-entity palette).
+CLEAN_PALETTE = {"gain": "#d7191c", "loss": "#2c7bb6"}
+
 
 # ---------------------------------------------------------------------------
 # TF correction — simple multiplicative scaling
@@ -776,6 +780,7 @@ def plot_longitudinal_combined(
         emergent_min_bins:    int   = 3,
         emergent_min_delta:   float = 0.5,
         emergent_tsv:         Path | None = None,
+        clean_plots:          bool  = True,
 ) -> None:
     """
     Two-panel longitudinal comparison. Scaling is computed on raw bins
@@ -799,6 +804,10 @@ def plot_longitudinal_combined(
           - 5-bin smoothed plot  (always)
           - 10-bin smoothed plot (always)
           - raw plot             (only if plot_raw=True)
+          - "clean" variants of the smoothed plots (if clean_plots=True),
+            written to <output_dir>/clean/, with no focal-amp shading and
+            a fixed gain/loss colour scheme (CLEAN_PALETTE) shared across
+            all entities — suitable for compiling into figures.
     """
     pal     = ICHORCNA_ENTITY_PALETTE.get(entity, ICHORCNA_ENTITY_PALETTE["Other"])
     color_a = "#888888"
@@ -944,14 +953,20 @@ def plot_longitudinal_combined(
         )
 
     # ── Render helper ────────────────────────────────────────────────────────
-    def _render(ba, bb, df_diff, out_path, label):
+    def _render(ba, bb, df_diff, out_path, label, clean=False):
+        # Clean plots use a fixed gain/loss colour scheme (no per-entity
+        # palette) and omit focal amplification shading entirely.
+        cur_pal     = CLEAN_PALETTE if clean else pal
+        cur_color_b = CLEAN_PALETTE["gain"] if clean else color_b
+        cur_focal_regions = [] if clean else focal_regions
+
         fig, (ax_top, ax_bot) = plt.subplots(
             2, 1, figsize=(22, 9.0), facecolor="white",
             gridspec_kw={"height_ratios": [1, 1], "hspace": 0.35},
         )
 
         def _shade(ax, ylim):
-            for region in focal_regions:
+            for region in cur_focal_regions:
                 ch = region["chrom"]
                 if ch not in _OFFSETS:
                     continue
@@ -973,9 +988,10 @@ def plot_longitudinal_combined(
             ls = "-" if ref == 0 else ":"
             cl = "#999999" if ref == 0 else "#cccccc"
             ax_top.axhline(ref, color=cl, linewidth=lw, linestyle=ls, zorder=1)
-        _shade(ax_top, logr_ylim)
+        if cur_focal_regions:
+            _shade(ax_top, logr_ylim)
         for bins, col, al, zo in [(ba, color_a, 0.50, 3),
-                                   (bb, color_b, 0.75, 4)]:
+                                   (bb, cur_color_b, 0.75, 4)]:
             xv = bins.apply(lambda r: _genome_x(
                 r["chrom"], (r["start"]+r["end"])/2), axis=1).values
             yv = np.clip(bins["logr_corrected"].values, *logr_ylim)
@@ -994,11 +1010,11 @@ def plot_longitudinal_combined(
         top_h = [
             mpatches.Patch(color=color_a,
                            label=f"{tp_a_str}  {sample_a}  (TF={tf_a:.1%})"),
-            mpatches.Patch(color=color_b,
+            mpatches.Patch(color=cur_color_b,
                            label=f"{tp_b_str}  {sample_b}  (TF={tf_b:.1%})"),
             plt.Line2D([0],[0], color="#999999", linewidth=1, label="log2R=0"),
         ]
-        if focal_regions:
+        if cur_focal_regions:
             top_h.append(mpatches.Patch(color="#b8860b", alpha=0.4,
                                          label="Focal amp"))
         ax_top.legend(handles=top_h, fontsize=8, loc="lower left",
@@ -1011,13 +1027,14 @@ def plot_longitudinal_combined(
             ls = "-" if ref == 0 else ":"
             cl = "#999999" if ref == 0 else "#cccccc"
             ax_bot.axhline(ref, color=cl, linewidth=lw, linestyle=ls, zorder=1)
-        _shade(ax_bot, delta_ylim)
+        if cur_focal_regions:
+            _shade(ax_bot, delta_ylim)
         if not df_diff.empty:
             xv = df_diff.apply(lambda r: _genome_x(
                 r["chrom"], (r["start"]+r["end"])/2), axis=1).values
             yv = np.clip(df_diff["delta_logr"].values, *delta_ylim)
-            ca = np.where(yv >= 0.5, pal["gain"],
-                 np.where(yv <= -0.5, pal["loss"], "#999999"))
+            ca = np.where(yv >= 0.5, cur_pal["gain"],
+                 np.where(yv <= -0.5, cur_pal["loss"], "#999999"))
             ax_bot.scatter(xv, yv, s=3.0, c=ca, alpha=0.70,
                            linewidths=0, zorder=3, rasterized=True)
         for reg in emergent_regions:
@@ -1026,7 +1043,7 @@ def plot_longitudinal_combined(
                 continue
             xr0 = _genome_x(ch, reg["start"])
             xr1 = _genome_x(ch, reg["end"])
-            shade_c = pal["gain"] if reg["direction"] == "gain" else pal["loss"]
+            shade_c = cur_pal["gain"] if reg["direction"] == "gain" else cur_pal["loss"]
             ax_bot.axvspan(xr0, xr1, alpha=0.22, color=shade_c, zorder=2)
         ax_bot.set_ylim(delta_ylim)
         ax_bot.set_ylabel(f"\u0394 log2 ratio\n({tp_b_str} \u2212 {tp_a_str})",
@@ -1037,14 +1054,14 @@ def plot_longitudinal_combined(
             ax_bot.text(GENOME_SIZE*1.001, yp, txt, fontsize=6 if yp!=0 else 7,
                         color="#999999" if yp!=0 else "#888888", va="center")
         bot_h = [
-            mpatches.Patch(color=pal["gain"],
+            mpatches.Patch(color=cur_pal["gain"],
                            label=f"Gain in {tp_b_str}  (\u0394 > +0.5)"),
-            mpatches.Patch(color=pal["loss"],
+            mpatches.Patch(color=cur_pal["loss"],
                            label=f"Loss in {tp_b_str}  (\u0394 < \u22120.5)"),
             mpatches.Patch(color="#999999", label="Unchanged"),
         ]
         if emergent_regions:
-            bot_h.append(mpatches.Patch(color=pal["gain"], alpha=0.3,
+            bot_h.append(mpatches.Patch(color=cur_pal["gain"], alpha=0.3,
                                          label="Emergent CNA"))
         ax_bot.legend(handles=bot_h, fontsize=8, loc="lower left",
                       facecolor="white", edgecolor="#cccccc",
@@ -1061,6 +1078,20 @@ def plot_longitudinal_combined(
     _render(bins_a_s10, bins_b_s10, diff_s10,
             output_path.with_name(output_path.name + "_smooth10"),
             "10-bin smooth")
+
+    # ── Clean (publication-figure) variants ─────────────────────────────────
+    # Same overlaid + differential panels, no focal amp shading, fixed
+    # gain/loss colour scheme (CLEAN_PALETTE) consistent across all entities.
+    if clean_plots:
+        clean_dir = output_path.parent / "clean"
+        clean_dir.mkdir(parents=True, exist_ok=True)
+        clean_out = clean_dir / output_path.name
+        _render(bins_a_s5,  bins_b_s5,  diff_s5,
+                clean_out.with_name(clean_out.name + "_clean_smooth5"),
+                "5-bin smooth", clean=True)
+        _render(bins_a_s10, bins_b_s10, diff_s10,
+                clean_out.with_name(clean_out.name + "_clean_smooth10"),
+                "10-bin smooth", clean=True)
 
 # ---------------------------------------------------------------------------
 # Batch: one combined plot per consecutive pair per patient
@@ -1081,6 +1112,7 @@ def plot_all_pairwise_longitudinal(
         emergent_min_bins:    int   = 3,
         emergent_min_delta:   float = 0.5,
         emergent_tsv:         Path | None = None,
+        clean_plots:          bool  = True,
 ) -> int:
     """
     Generate one genome-wide log2-ratio comparison plot per consecutive
@@ -1179,6 +1211,7 @@ def plot_all_pairwise_longitudinal(
                 emergent_min_bins    = emergent_min_bins,
                 emergent_min_delta   = emergent_min_delta,
                 emergent_tsv         = emergent_tsv,
+                clean_plots          = clean_plots,
             )
             n_plots += 1
             gc.collect()

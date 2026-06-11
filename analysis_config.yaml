@@ -33,7 +33,7 @@ focal:
   noise-factor:         2.0     # Segment logR must be ≥ noise_factor × noise
   max-focal-per-sample: 50       # Discard samples with > N focal amps
   freq-min-freq:        0.0     # Min patient frequency for frequency plot
-  amp-diagnostics:      true   # Generate per-sample diagnostic plots
+  amp-diagnostics:      false #true   # Generate per-sample diagnostic plots
 
 # ── Broad CNA plot ───────────────────────────────────────────────────────────
 plot:
@@ -42,13 +42,28 @@ plot:
 # ── COSMIC annotation ────────────────────────────────────────────────────────
 cosmic-cgc: ref/Census_allFri_Sep_6_09_26_04_2024.tsv
 
+# ──  LiquidCNA  ───────────────────────────────────────────────────────
+liquidcna: false
+liquidcna-functions: ./mixture_estimation_functions.R
+liquidcna-min-tf: 0.2
+liquidcna-min-timepoints: 2
+
+# ── Sigminer CN signatures ───────────────────────────────────────────────────
+sigminer: true                   # Set to true to enable
+sigminer-ref: [CNS_TCGA]
+sigminer-n-sig: 6
+sigminer-min-tf:      0.15        # Min TF for samples (15%)
+sigminer-genome:      hg38        # hg38 or hg19
+sigminer-cores:       1           # Parallel cores
+sigminer-no-run:      false       # Prepare R script but don't execute
+
 # ── Longitudinal plots ───────────────────────────────────────────────────────
 longitudinal:
-  plots:                true    # Enable longitudinal comparison plots
+  plots:                false # true    # Enable longitudinal comparison plots
   # plot-dir: null              # Output dir (default: <output>/longitudinal_plots)
-  max-noise:            0.15    # Max neighbour noise; noisier pairs are skipped
+  max-noise:            0.35    # Max neighbour noise; noisier pairs are skipped
   min-signal:           null    # Min SNR (p95/noise); null = disabled
-  min-altered-fraction: 0.05    # Min fraction of bins with |logR| > 0.2
+  min-altered-fraction: 0.01    # Min fraction of bins with |logR| > 0.2
   plot-raw:             false   # Also output unsmoothed plots
   emergent-min-bins:    3       # Min consecutive bins to call emergent CNA
   emergent-min-delta:   0.5     # Min |delta log2R| per bin for emergent CNA

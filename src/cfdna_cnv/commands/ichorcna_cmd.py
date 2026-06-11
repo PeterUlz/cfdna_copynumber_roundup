@@ -579,3 +579,40 @@ def run(args: argparse.Namespace) -> None:
 
     print(f"\nAll results written to: {outdir.resolve()}")
     print("=" * 70)
+
+    # ── Sigminer CN signatures ────────────────────────────────────────────
+    if getattr(args, "sigminer", False):
+        from ..sigminer import run_sigminer
+        sig_dir = outdir / "sigminer"
+        print(f"\n[Sigminer] CN signature analysis → {sig_dir}")
+        run_sigminer(
+            tf_df=tf_df,
+            seg_files=seg_1mb_files,
+            output_dir=sig_dir,
+            ref_sets=getattr(args, "sigminer_ref",
+                             ["CNS_TCGA", "CNS_PCAWG176"]),
+            min_tf=getattr(args, "sigminer_min_tf", 0.15),
+            genome=getattr(args, "sigminer_genome", "hg38"),
+            cores=getattr(args, "sigminer_cores", 1),
+            rscript_bin=getattr(args, "rscript", "Rscript"),
+            run_r=not getattr(args, "sigminer_no_run", False),
+        )
+
+    # ── LiquidCNA ──────────────────────────────────────────────────────────
+    if getattr(args, "liquidcna", False):
+        from ..liquidcna import run_liquidcna
+        lcna_dir       = outdir / "liquidcna"
+        functions_path = Path(args.liquidcna_functions) \
+                         if getattr(args, "liquidcna_functions", None) \
+                         else Path("mixture_estimation_functions.R")
+        print(f"\n[LiquidCNA] Subclonal evolution analysis → {lcna_dir}")
+        run_liquidcna(
+            tf_df          = tf_df,
+            seg_files_1mb  = seg_1mb_files,
+            output_dir     = lcna_dir,
+            functions_path = functions_path,
+            min_tf         = getattr(args, "liquidcna_min_tf", 0.20),
+            min_timepoints = getattr(args, "liquidcna_min_timepoints", 2),
+            rscript_bin    = getattr(args, "rscript", "Rscript"),
+            run_r          = not getattr(args, "liquidcna_no_run", False),
+        )

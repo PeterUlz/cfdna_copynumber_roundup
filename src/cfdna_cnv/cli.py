@@ -127,6 +127,46 @@ def _build_ichorcna_parser(sub: argparse._SubParsersAction) -> None:
     p.add_argument("--emergent-min-delta", type=float, default=0.5,
                    help="Minimum |delta log2R| per bin to count toward "
                         "an emergent CNA region (default 0.5).")
+    # Sigminer CN signatures
+    p.add_argument("--sigminer", action="store_true",
+                   help="Run sigminer CN signature analysis.")
+    p.add_argument("--sigminer-ref", nargs="+",
+                   default=["CNS_TCGA", "CNS_PCAWG176"],
+                   metavar="REF",
+                   help="Reference signature set(s) to fit against. "
+                        "Built-in options: CNS_TCGA (48 cat), "
+                        "CNS_PCAWG176 (176 cat), CNS_TCGA176 (176 cat), "
+                        "CNS_USARC (40 cat). Default: CNS_TCGA CNS_PCAWG176.")
+    p.add_argument("--sigminer-min-tf", type=float, default=0.15,
+                   help="Minimum TF for sigminer samples (default 0.15 = 15%%).")
+    p.add_argument("--sigminer-genome", default="hg38",
+                   choices=["hg38", "hg19"],
+                   help="Reference genome for sigminer (default hg38).")
+    p.add_argument("--sigminer-cores", type=int, default=1,
+                   help="Parallel cores for sigminer (default 1).")
+    p.add_argument("--sigminer-no-run", action="store_true",
+                   help="Prepare sigminer inputs and R script but do not "
+                        "execute Rscript.")
+
+    # LiquidCNA integration
+    p.add_argument("--liquidcna", action="store_true",
+                   help="Run liquidCNA subclonal evolution analysis on samples "
+                        "with >= 2 timepoints above --liquidcna-min-tf.")
+    p.add_argument("--liquidcna-functions", default=None, metavar="FILE",
+                   help="Path to mixture_estimation_functions.R from "
+                        "github.com/elakatos/liquidCNA (required for --liquidcna).")
+    p.add_argument("--liquidcna-min-tf", type=float, default=0.20,
+                   help="Minimum tumor fraction for liquidCNA samples "
+                        "(default 0.20 = 20%%).")
+    p.add_argument("--liquidcna-min-timepoints", type=int, default=2,
+                   help="Minimum qualifying timepoints per patient for "
+                        "liquidCNA (default 2).")
+    p.add_argument("--liquidcna-no-run", action="store_true",
+                   help="Prepare liquidCNA inputs and R script but do not "
+                        "execute Rscript (useful for inspection or cluster jobs).")
+    p.add_argument("--rscript", default="Rscript", metavar="BIN",
+                   help="Path to Rscript binary (default: Rscript).")
+
     # Annotation
     _add_cosmic_arg(p)
     p.set_defaults(func=_run_ichorcna)
@@ -206,11 +246,6 @@ def _build_cbio_parser(sub: argparse._SubParsersAction) -> None:
     # Annotation
     _add_cosmic_arg(p)
     p.set_defaults(func=_run_cbio)
-
-
-def _run_ichorcna(args: argparse.Namespace) -> None:
-    from .commands.ichorcna_cmd import run
-    run(args)
 
 
 def _run_cbio(args: argparse.Namespace) -> None:
