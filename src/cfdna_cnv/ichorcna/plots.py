@@ -352,12 +352,13 @@ def plot_focal_amp_frequencies(
         )
 
         # Draw as bars (50 kbp wide) — adjacent bins from the same focal amp
-        # region form a continuous plateau revealing the MCR
+        # region form a continuous plateau revealing the MCR.
+        # Fixed two-colour scheme: CGC driver gene = #d7191c, no known driver = #2c7bb6
         for _, row in loci.iterrows():
             x0    = _genome_x(row["chrom"], int(row["start"]))
             width = int(row["end"]) - int(row["start"])
             freq  = row["freq_entity"]
-            color = "#e63946" if row["has_gene"] else pal["gain"]
+            color = "#d7191c" if row["has_gene"] else "#2c7bb6"
             ax.bar(x0, freq, width=width, align="edge",
                    color=color, alpha=0.85, linewidth=0, zorder=2)
 
@@ -382,7 +383,7 @@ def plot_focal_amp_frequencies(
                 continue
             label_xs.append(x_mid)
             ax.text(x_mid, freq + 0.008, gene,
-                    fontsize=6.5, color="#b8860b",
+                    fontsize=6.5, color="#d7191c",
                     ha="center", va="bottom", rotation=90,
                     fontweight="bold", zorder=4, clip_on=True)
 
@@ -398,8 +399,8 @@ def plot_focal_amp_frequencies(
             fontsize=11, fontweight="bold", color="#222222", pad=6, loc="left",
         )
         handles = [
-            mpatches.Patch(color=pal["gain"], label="Focal amp coverage"),
-            mpatches.Patch(color="#e63946",   label="Overlaps COSMIC CGC gene"),
+            mpatches.Patch(color="#2c7bb6", label="Focal amp (no known CGC driver)"),
+            mpatches.Patch(color="#d7191c", label="Overlaps COSMIC CGC driver gene"),
         ]
         ax.legend(handles=handles, fontsize=7.5, loc="lower left",
                   facecolor="white", edgecolor="#cccccc",

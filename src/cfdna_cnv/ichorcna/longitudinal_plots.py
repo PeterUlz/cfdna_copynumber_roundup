@@ -1589,6 +1589,7 @@ def plot_focal_amp_trajectories(
         seg_files_bins: dict[str, Path],
         focal_regions:  list[dict],
         output_dir:     Path,
+        seg_files_segs: dict[str, Path] | None = None,
 ) -> bool:
     """
     For one patient, plot the relative copy-number trajectory of each focal
@@ -1596,10 +1597,24 @@ def plot_focal_amp_trajectories(
 
     Two figures are written:
       <patient>_focal_amp_trajectory_log2.pdf/.png
-          y-axis: TF-corrected log2 ratio (scaled to the patient's
-          highest-TF timepoint), one line per focal amp region.
+          y-axis: log2 ratio scaled to a common reference (see below),
+          one line per focal amp region.
       <patient>_focal_amp_trajectory_cn.pdf/.png
           y-axis: relative copy number = 2 * 2^(log2 ratio), same scaling.
+
+    Scaling
+    -------
+    All timepoints are placed on a single common scale defined by the
+    patient's HIGHEST-TF timepoint (the reference; scale factor = 1.0).
+    For every other timepoint, an empirical scale factor m >= 1 is fit
+    via weighted least squares (_optimise_scaling) between that
+    timepoint's segment-mean log2 ratios and the reference's, then
+    applied to that timepoint's bin-level log2 ratios. This is the same
+    empirical-scaling approach used for the pairwise longitudinal plots,
+    extended to a single shared reference rather than pairwise references
+    — so all timepoints for a patient are directly comparable on one
+    plot. If seg_files_segs is not provided, falls back to a naive
+    TF-ratio rescaling (logR * TF_ref / TF_sample).
 
     Each point is the mean over the 50 kbp bins overlapping the region;
     error bars show the interquartile range (Q1-Q3) of those bins, giving
@@ -1619,6 +1634,7 @@ def plot_focal_amp_trajectories(
     ref_tf = max(tfs)
     if ref_tf <= 0:
         return False
+    ref_idx = tfs.index(ref_tf)
 
     # ── Region labels (unique) ───────────────────────────────────────────
     labels: list[str] = []
@@ -1632,7 +1648,45 @@ def plot_focal_amp_trajectories(
             seen[lbl] = 0
         labels.append(lbl)
 
-    # ── Per-sample, per-region mean logR + IQR (scaled to ref_tf) ────────
+    # ── Determine a common scale factor for each timepoint ───────────────
+    # Reference (highest-TF) timepoint: scale factor = 1.0.
+    # All other timepoints: empirical scale factor (>= 1) fit against the
+    # reference via segment-mean log2 ratios, applied to bin-level logR.
+    scale_factors: list[float] = [1.0] * len(samples)
+
+    ref_sample = samples[ref_idx]
+    ref_seg_path = seg_files_bins.get(ref_sample)
+    ref_segmeans = None
+    if seg_files_segs is not None and ref_seg_path is not None:
+        ref_segs_path = seg_files_segs.get(ref_sample)
+        if ref_segs_path is not None:
+            ref_segmeans = _load_bins_with_seg_means(
+                ref_seg_path, ref_segs_path, ref_sample, tf_from=tfs[ref_idx]
+            )
+
+    for i, (sample, tf) in enumerate(zip(samples, tfs)):
+        if i == ref_idx:
+            continue
+        m = None
+        if ref_segmeans is not None:
+            seg_path  = seg_files_bins.get(sample)
+            segs_path = seg_files_segs.get(sample) if seg_files_segs else None
+            if seg_path is not None and segs_path is not None:
+                samp_segmeans = _load_bins_with_seg_means(
+                    seg_path, segs_path, sample, tf_from=tf
+                )
+                if samp_segmeans is not None and not samp_segmeans.empty:
+                    aligned = _align_bins(ref_segmeans, samp_segmeans)
+                    if not aligned.empty:
+                        m, _ = _optimise_scaling(
+                            aligned["logr_a"].values, aligned["logr_b"].values
+                        )
+        if m is None:
+            # Fallback: naive TF-ratio scaling
+            m = (ref_tf / tf) if tf > 0 else 1.0
+        scale_factors[i] = m
+
+    # ── Per-sample, per-region mean logR + IQR (common scale applied) ───
     log2_matrix = np.full((len(samples), len(focal_regions)), np.nan)
     log2_q1     = np.full((len(samples), len(focal_regions)), np.nan)
     log2_q3     = np.full((len(samples), len(focal_regions)), np.nan)
@@ -1640,9 +1694,15 @@ def plot_focal_amp_trajectories(
         seg_path = seg_files_bins.get(sample)
         if seg_path is None:
             continue
-        bins_df = _load_bins(seg_path, sample, tf_from=tf, tf_to=ref_tf)
+        # tf_to=tf_from -> no TF-ratio correction; the empirical scale
+        # factor (or fallback TF-ratio factor) is applied explicitly below.
+        bins_df = _load_bins(seg_path, sample, tf_from=tf)
         if bins_df is None or bins_df.empty:
             continue
+        m = scale_factors[i]
+        if m != 1.0:
+            bins_df = bins_df.copy()
+            bins_df["logr_corrected"] = bins_df["logr_corrected"] * m
         for j, region in enumerate(focal_regions):
             mean, q1, q3 = _region_logr_stats(bins_df, region)
             log2_matrix[i, j] = mean
@@ -1664,8 +1724,10 @@ def plot_focal_amp_trajectories(
 
     title_main = f"{patient}  ({entity})   Focal amplification trajectories"
     title_sub  = "   ".join(
-        f"TP{tp} (TF={tf:.1%})" for tp, tf in zip(timepoints, tfs)
-    ) + f"     [scaled to TF={ref_tf:.1%}; error bars = IQR of bins in segment]"
+        f"TP{tp} (TF={tf:.1%}, \u00d7{m:.2f})"
+        for tp, tf, m in zip(timepoints, tfs, scale_factors)
+    ) + (f"     [common scale: TP{timepoints[ref_idx]} is reference "
+         f"(TF={ref_tf:.1%}); error bars = IQR of bins in segment]")
 
     def _new_axes():
         fig, ax = plt.subplots(figsize=(8.5, 5.0), facecolor="white")
@@ -1730,6 +1792,7 @@ def plot_all_focal_amp_trajectories(
         output_dir:     Path,
         min_tf:         float = 0.10,
         min_timepoints: int   = 2,
+        seg_files_segs: dict[str, Path] | None = None,
 ) -> int:
     """
     Batch driver: for every patient with >= min_timepoints qualifying
@@ -1747,6 +1810,9 @@ def plot_all_focal_amp_trajectories(
                      (default 0.10 = 10%; samples below this are dropped
                      from the trajectory entirely).
     min_timepoints : minimum number of qualifying timepoints per patient.
+    seg_files_segs : {sample: Path} to segmented .seg.txt files, used for
+                     the empirical common-reference scale factor. If not
+                     provided, falls back to naive TF-ratio scaling.
 
     Returns
     -------
@@ -1816,6 +1882,7 @@ def plot_all_focal_amp_trajectories(
             seg_files_bins = seg_files_bins,
             focal_regions  = regions,
             output_dir     = output_dir,
+            seg_files_segs = seg_files_segs,
         )
         if ok:
             n_plots += 1

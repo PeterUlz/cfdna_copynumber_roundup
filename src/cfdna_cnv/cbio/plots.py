@@ -155,7 +155,7 @@ def plot_focal_amp_frequencies(
     for _, row in df.iterrows():
         x     = row["mid_genome"]
         freq  = row["frequency"]
-        color = "#ff6b6b" if row["has_gene"] else pal["gain"]
+        color = "#d7191c" if row["has_gene"] else "#2c7bb6"
         ax.vlines(x, 0, freq, colors=color, linewidth=1.2, alpha=0.7, zorder=2)
         ax.scatter(x, freq, color=color, s=18, zorder=3,
                    edgecolors="none", alpha=0.9)
@@ -175,7 +175,7 @@ def plot_focal_amp_frequencies(
             continue
         label_xs.append(x)
         ax.text(x, freq + 0.015, gene.split(",")[0],
-                fontsize=6.5, color="#b8860b",
+                fontsize=6.5, color="#d7191c",
                 ha="center", va="bottom", rotation=90,
                 fontweight="bold", zorder=4)
 
@@ -191,8 +191,8 @@ def plot_focal_amp_frequencies(
         fontsize=11, fontweight="bold", color="#222222", pad=8, loc="left"
     )
     handles = [
-        mpatches.Patch(color=pal["gain"],  label="Focal amp"),
-        mpatches.Patch(color="#ff6b6b",    label="Focal amp overlapping COSMIC CGC gene"),
+        mpatches.Patch(color="#2c7bb6", label="Focal amp (no known CGC driver)"),
+        mpatches.Patch(color="#d7191c", label="Overlaps COSMIC CGC driver gene"),
     ]
     ax.legend(handles=handles, fontsize=8, loc="lower left",
               facecolor="white", edgecolor="#cccccc",
