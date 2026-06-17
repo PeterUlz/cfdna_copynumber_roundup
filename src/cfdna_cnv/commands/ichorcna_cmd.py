@@ -488,6 +488,8 @@ def run(args: argparse.Namespace) -> None:
             min_tf         = 0.10,
             min_timepoints = 2,
             seg_files_segs = seg_50k_files,
+            min_reads      = 1_000_000,
+            max_scale      = 3.0,
         )
         print(f"      Generated {n_traj} focal amp trajectory plot pair(s) "
               f"→ {focal_traj_dir}")

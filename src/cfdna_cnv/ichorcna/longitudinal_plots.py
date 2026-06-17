@@ -1569,15 +1569,18 @@ def _region_logr_stats(bins_df: pd.DataFrame, region: dict) -> tuple[float, floa
 
 
 def _trajectory_palette(n: int) -> list:
-    """Return n visually distinct colours for line plots."""
-    if n <= 10:
-        cmap = plt.colormaps.get_cmap("tab10")
-        return [cmap(i) for i in range(n)]
-    if n <= 20:
-        cmap = plt.colormaps.get_cmap("tab20")
-        return [cmap(i) for i in range(n)]
-    cmap = plt.colormaps.get_cmap("hsv")
-    return [cmap(i / n) for i in range(n)]
+    """
+    Return colours for focal amp trajectory lines and genome map boxes.
+
+    Fixed 6-colour Brown-Teal diverging palette. Beyond 6 regions, extra
+    colours fall back to tab20 (the 6-per-patient cap makes this unlikely).
+    """
+    _FIXED = ["#8c510a", "#d8b365", "#f6e8c3", "#c7eae5", "#5ab4ac", "#01665e"]
+    if n <= len(_FIXED):
+        return _FIXED[:n]
+    extra = n - len(_FIXED)
+    cmap  = plt.colormaps.get_cmap("tab20")
+    return _FIXED + [cmap(i) for i in range(extra)]
 
 
 def plot_focal_amp_trajectories(
@@ -1590,50 +1593,31 @@ def plot_focal_amp_trajectories(
         focal_regions:  list[dict],
         output_dir:     Path,
         seg_files_segs: dict[str, Path] | None = None,
-) -> bool:
+        total_reads:    list[int | None] | None = None,
+        min_reads:      int   = 1_000_000,
+        max_scale:      float = 3.0,
+) -> tuple[bool, list[float]]:
     """
     For one patient, plot the relative copy-number trajectory of each focal
     amplification region across timepoints as line plots.
 
     Two figures are written:
       <patient>_focal_amp_trajectory_log2.pdf/.png
-          y-axis: log2 ratio scaled to a common reference (see below),
-          one line per focal amp region.
       <patient>_focal_amp_trajectory_cn.pdf/.png
-          y-axis: relative copy number = 2 * 2^(log2 ratio), same scaling.
 
-    Scaling
-    -------
-    All timepoints are placed on a single common scale defined by the
-    patient's HIGHEST-TF timepoint (the reference; scale factor = 1.0).
-    For every other timepoint, an empirical scale factor m >= 1 is fit
-    via weighted least squares (_optimise_scaling) between that
-    timepoint's segment-mean log2 ratios and the reference's, then
-    applied to that timepoint's bin-level log2 ratios. This is the same
-    empirical-scaling approach used for the pairwise longitudinal plots,
-    extended to a single shared reference rather than pairwise references
-    — so all timepoints for a patient are directly comparable on one
-    plot. If seg_files_segs is not provided, falls back to a naive
-    TF-ratio rescaling (logR * TF_ref / TF_sample).
+    Samples are excluded from the plot if:
+      - total_reads < min_reads (default 1,000,000)
+      - empirical scale factor > max_scale (default 3.0)
 
-    Each point is the mean over the 50 kbp bins overlapping the region;
-    error bars show the interquartile range (Q1-Q3) of those bins, giving
-    a sense of within-segment variation/noise at each timepoint. Regions
-    spanning very few bins will have narrow or degenerate (zero-length)
-    error bars.
-
-    Each focal amp region (merged across all of the patient's timepoints)
-    gets its own colour, consistent between the two plots.
-
-    Returns True if plots were written, False if there was nothing to plot
-    (fewer than 2 timepoints, no focal regions, or no bin data available).
+    Returns (success: bool, scale_factors: list[float]) so the caller can
+    use the computed scale factors for downstream plots.
     """
     if len(samples) < 2 or not focal_regions:
-        return False
+        return False, []
 
     ref_tf = max(tfs)
     if ref_tf <= 0:
-        return False
+        return False, []
     ref_idx = tfs.index(ref_tf)
 
     # ── Region labels (unique) ───────────────────────────────────────────
@@ -1686,7 +1670,36 @@ def plot_focal_amp_trajectories(
             m = (ref_tf / tf) if tf > 0 else 1.0
         scale_factors[i] = m
 
-    # ── Per-sample, per-region mean logR + IQR (common scale applied) ───
+    # ── Filter: drop samples that are too noisy to be useful ─────────────
+    # 1. total_reads < min_reads  →  too few reads, signal unreliable
+    # 2. scale_factor > max_scale →  huge TF difference, correction is
+    #    speculative and amplifies noise
+    reads_arr = total_reads if total_reads is not None else [None] * len(samples)
+    keep_mask = []
+    for i, (sample, m, reads) in enumerate(
+            zip(samples, scale_factors, reads_arr)):
+        if reads is not None and reads < min_reads:
+            print(f"        [SKIP] {sample}: {reads:,} reads < "
+                  f"{min_reads:,} — excluded from trajectory")
+            keep_mask.append(False)
+        elif m > max_scale:
+            print(f"        [SKIP] {sample}: scale factor {m:.2f} > "
+                  f"{max_scale:.1f} — excluded from trajectory")
+            keep_mask.append(False)
+        else:
+            keep_mask.append(True)
+
+    # Always keep the reference timepoint
+    keep_mask[ref_idx] = True
+
+    samples    = [s for s, k in zip(samples,    keep_mask) if k]
+    timepoints = [t for t, k in zip(timepoints, keep_mask) if k]
+    tfs        = [f for f, k in zip(tfs,        keep_mask) if k]
+    scale_factors = [m for m, k in zip(scale_factors, keep_mask) if k]
+
+    if len(samples) < 2:
+        print(f"        {patient}: fewer than 2 samples pass filters — skipping.")
+        return False, []
     log2_matrix = np.full((len(samples), len(focal_regions)), np.nan)
     log2_q1     = np.full((len(samples), len(focal_regions)), np.nan)
     log2_q3     = np.full((len(samples), len(focal_regions)), np.nan)
@@ -1710,7 +1723,7 @@ def plot_focal_amp_trajectories(
             log2_q3[i, j]     = q3
 
     if np.all(np.isnan(log2_matrix)):
-        return False
+        return False, []
 
     cn_matrix = 2.0 * np.power(2.0, log2_matrix)
     # 2^x is monotonic, so percentile bounds carry over directly
@@ -1782,7 +1795,223 @@ def plot_focal_amp_trajectories(
     fig.tight_layout()
     _save(fig, output_dir / f"{patient}_focal_amp_trajectory_cn")
 
-    return True
+    # ── Genome map: CN profiles per sample with focal amp boxes ─────────
+    _plot_focal_amp_genome_map(
+        patient         = patient,
+        entity          = entity,
+        samples         = samples,
+        timepoints      = timepoints,
+        tfs             = tfs,
+        scale_factors   = scale_factors,
+        seg_files_bins  = seg_files_bins,
+        seg_files_segs  = seg_files_segs,
+        focal_regions   = focal_regions,
+        labels          = labels,
+        colors          = colors,
+        output_dir      = output_dir,
+    )
+
+    return True, scale_factors
+
+
+def _plot_focal_amp_genome_map(
+        patient:        str,
+        entity:         str,
+        samples:        list[str],
+        timepoints:     list[int],
+        tfs:            list[float],
+        scale_factors:  list[float],
+        seg_files_bins: dict[str, Path],
+        seg_files_segs: dict[str, Path] | None,
+        focal_regions:  list[dict],
+        labels:         list[str],
+        colors:         list,
+        output_dir:     Path,
+        logr_ylim:      tuple[float, float] = (-2.5, 2.5),
+) -> None:
+    """
+    For each timepoint: a genome-wide 50 kbp bin-level log2-ratio scatter
+    (grey, semi-transparent), with segment means overlaid as blue horizontal
+    step lines, and coloured upward triangle markers + short stems placed at
+    the bottom of the plot (y ≈ logr_ylim[0] + 0.35) to indicate each focal
+    amplification region without obscuring the CN data.
+
+    Marker colours match the trajectory line-plot palette.  Gene name labels
+    are printed just above each marker.  One panel per timepoint, stacked
+    vertically.  Written as <patient>_focal_amp_genome_map.pdf/.png.
+    """
+    from .plots import _save as _plots_save
+    import matplotlib.patches as mpatches_local
+
+    n_tp    = len(samples)
+    fig, axes = plt.subplots(
+        n_tp, 1,
+        figsize=(22, 3.5 * n_tp),
+        facecolor="white",
+        sharex=True,
+        gridspec_kw={"hspace": 0.45},
+    )
+    if n_tp == 1:
+        axes = [axes]
+
+    for ax_idx, (sample, tp, tf, m) in enumerate(
+        zip(samples, timepoints, tfs, scale_factors)
+    ):
+        ax = axes[ax_idx]
+        _style_ax(ax)
+        ax.axhline(0,    color="#999999", linewidth=0.7, linestyle="-",  zorder=1)
+        ax.axhline(0.58, color="#cccccc", linewidth=0.4, linestyle=":", zorder=1)
+        ax.axhline(-0.58,color="#cccccc", linewidth=0.4, linestyle=":", zorder=1)
+
+        # ── Plot 50 kbp bins (TF-corrected + common-scale factor) ────────
+        bins_df = _load_bins(seg_files_bins.get(sample), sample, tf_from=tf)
+        if bins_df is not None and not bins_df.empty and m != 1.0:
+            bins_df = bins_df.copy()
+            bins_df["logr_corrected"] = bins_df["logr_corrected"] * m
+
+        seg_path = seg_files_bins.get(sample)
+        segs_df  = None
+        if seg_path is not None and sample in (seg_files_segs or {}):
+            segs_df = _load_bins_with_seg_means(
+                seg_path, seg_files_segs[sample], sample, tf_from=tf
+            )
+            if segs_df is not None and not segs_df.empty and m != 1.0:
+                segs_df = segs_df.copy()
+                segs_df["logr_corrected"] = segs_df["logr_corrected"] * m
+
+        if bins_df is not None and not bins_df.empty:
+            xv = bins_df.apply(
+                lambda r: _genome_x(r["chrom"], (r["start"] + r["end"]) / 2),
+                axis=1,
+            ).values
+            yv = np.clip(bins_df["logr_corrected"].values, *logr_ylim)
+            ax.scatter(xv, yv, s=1.5, c="#888888", alpha=0.25,
+                       linewidths=0, zorder=2, rasterized=True)
+
+        # ── Segment means as step lines — blue normally, red in focal amps ──
+        if segs_df is not None and not segs_df.empty:
+            # Build a set of (chrom, start, end) intervals for focal regions
+            focal_intervals: dict[str, list[tuple[int,int]]] = {}
+            for region in focal_regions:
+                focal_intervals.setdefault(region["chrom"], []).append(
+                    (int(region["start"]), int(region["end"]))
+                )
+
+            def _in_focal(chrom: str, start: int, end: int) -> bool:
+                for fs, fe in focal_intervals.get(chrom, []):
+                    if start < fe and end > fs:
+                        return True
+                return False
+
+            for chrom, grp in segs_df.groupby("chrom", sort=False):
+                if chrom not in _OFFSETS:
+                    continue
+                grp = grp.sort_values("start")
+                prev_val   = None
+                seg_start  = None
+                seg_in_foc = False
+                for _, row in grp.iterrows():
+                    val     = round(float(row["logr_corrected"]), 6)
+                    x0r     = _genome_x(chrom, int(row["start"]))
+                    x1r     = _genome_x(chrom, int(row["end"]))
+                    in_foc  = _in_focal(chrom, int(row["start"]), int(row["end"]))
+                    if val != prev_val or in_foc != seg_in_foc:
+                        if prev_val is not None and seg_start is not None:
+                            ax.plot(
+                                [seg_start, x0r],
+                                [np.clip(prev_val, *logr_ylim)] * 2,
+                                color="#d7191c" if seg_in_foc else "#2c7bb6",
+                                linewidth=1.6 if seg_in_foc else 1.2,
+                                solid_capstyle="butt", zorder=3,
+                            )
+                        seg_start  = x0r
+                        prev_val   = val
+                        seg_in_foc = in_foc
+                if prev_val is not None and seg_start is not None:
+                    ax.plot(
+                        [seg_start, x1r],
+                        [np.clip(prev_val, *logr_ylim)] * 2,
+                        color="#d7191c" if seg_in_foc else "#2c7bb6",
+                        linewidth=1.6 if seg_in_foc else 1.2,
+                        solid_capstyle="butt", zorder=3,
+                    )
+
+        # ── Focal amp markers at y = -2: triangle pointing up ────────────
+        # Placed at a fixed low position so they don't obscure the CN data.
+        marker_y = logr_ylim[0] + 0.35   # just above the bottom
+        for region, label, color in zip(focal_regions, labels, colors):
+            chrom = region["chrom"]
+            if chrom not in _OFFSETS:
+                continue
+            x0    = _genome_x(chrom, region["start"])
+            x1    = _genome_x(chrom, region["end"])
+            x_mid = (x0 + x1) / 2
+            width = max(x1 - x0, GENOME_SIZE * 0.002)
+
+            # Filled triangle marker
+            ax.scatter(
+                [x_mid], [marker_y],
+                marker="^", s=60, c=[color],
+                edgecolors="#333333", linewidths=0.4,
+                zorder=5, clip_on=True,
+            )
+            # Thin vertical stem from marker to just above it
+            ax.vlines(
+                x_mid, marker_y, marker_y + 0.35,
+                colors=color, linewidth=1.0, zorder=4,
+            )
+            # Gene/coordinate label
+            genes = str(region.get("cosmic_genes", "")).strip()
+            gene_label = (genes.split(",")[0].strip()
+                          if genes and genes.lower() != "nan" else label)
+            ax.text(
+                x_mid, marker_y + 0.40,
+                gene_label,
+                fontsize=5.5, color=color, ha="center", va="bottom",
+                fontweight="bold", zorder=6, clip_on=True,
+            )
+
+        ax.set_ylim(logr_ylim)
+        ax.set_ylabel("log2R", fontsize=8, color="#444444", labelpad=3)
+        ax.yaxis.set_major_locator(mticker.MultipleLocator(1.0))
+        ax.yaxis.set_major_formatter(mticker.FormatStrFormatter("%.0f"))
+        ax.set_title(
+            f"TP{tp}  —  {sample}  (TF={tf:.1%}, ×{m:.2f})",
+            fontsize=9, fontweight="bold", color="#222222",
+            loc="left", pad=4,
+        )
+
+    # shared legend
+    legend_handles = [
+        plt.Line2D([0], [0], color="#2c7bb6", linewidth=1.2,
+                   label="Segment mean"),
+        plt.Line2D([0], [0], color="#d7191c", linewidth=1.6,
+                   label="Segment mean (focal amp region)"),
+        plt.Line2D([0], [0], marker="o", color="w", markerfacecolor="#888888",
+                   markersize=5, alpha=0.5, label="50 kbp bins (raw)"),
+    ] + [
+        plt.Line2D([0], [0], marker="^", color="w",
+                   markerfacecolor=c, markeredgecolor="#333333",
+                   markersize=7, label=lbl)
+        for c, lbl in zip(colors, labels)
+    ]
+    axes[0].legend(
+        handles=legend_handles,
+        fontsize=7.5,
+        loc="upper right",
+        ncol=min(len(legend_handles), 4),
+        frameon=True, facecolor="white", edgecolor="#cccccc",
+        labelcolor="#222222",
+        title="▲ = focal amp location (at bottom of plot)",
+        title_fontsize=7.0,
+    )
+
+    fig.suptitle(
+        f"{patient}  ({entity})   Focal amplification genome map",
+        fontsize=11, fontweight="bold", color="#222222", y=1.01,
+    )
+    fig.tight_layout()
+    _plots_save(fig, output_dir / f"{patient}_focal_amp_genome_map")
 
 
 def plot_all_focal_amp_trajectories(
@@ -1793,30 +2022,23 @@ def plot_all_focal_amp_trajectories(
         min_tf:         float = 0.10,
         min_timepoints: int   = 2,
         seg_files_segs: dict[str, Path] | None = None,
+        min_reads:      int   = 1_000_000,
+        max_scale:      float = 3.0,
 ) -> int:
     """
     Batch driver: for every patient with >= min_timepoints qualifying
-    timepoints AND at least one focal amplification event (in any of their
-    samples), generate the log2 and relative-CN trajectory plots.
+    timepoints AND at least one focal amplification event, generate:
+      1. log2 and relative-CN trajectory plots
+      2. genome map with per-timepoint CN profiles and focal amp markers
+      3. overlay CN profile plot — all corrected segment mean profiles on
+         one genome-wide panel, one line per timepoint, different colours
 
-    Parameters
-    ----------
-    focal_tsv      : path to focal_amplifications.tsv.
-    tf_df          : tumor fraction table (sample, patient, timepoint,
-                     tumor_fraction).
-    seg_files_bins : {sample: Path} to 50 kbp .cna.seg bin-level files.
-    output_dir     : directory for the trajectory plots.
-    min_tf         : minimum tumor fraction for a timepoint to be included
-                     (default 0.10 = 10%; samples below this are dropped
-                     from the trajectory entirely).
-    min_timepoints : minimum number of qualifying timepoints per patient.
-    seg_files_segs : {sample: Path} to segmented .seg.txt files, used for
-                     the empirical common-reference scale factor. If not
-                     provided, falls back to naive TF-ratio scaling.
+    Filters applied per timepoint:
+      - tumor_fraction >= min_tf  (default 0.10)
+      - total_reads   >= min_reads (default 1,000,000)
+      - scale_factor  <= max_scale (default 3.0)
 
-    Returns
-    -------
-    Number of patients for which plots were generated.
+    Returns number of patients for which plots were generated.
     """
     if not focal_tsv.exists() or focal_tsv.stat().st_size == 0:
         print("        No focal_amplifications.tsv — skipping trajectories.")
@@ -1865,6 +2087,8 @@ def plot_all_focal_amp_trajectories(
                 "start":        int(row["start"]),
                 "end":          int(row["end"]),
                 "cosmic_genes": row["cosmic_genes"],
+                "logr":         float(row.get("logr", row.get("seg.mean",
+                                    row.get("log2_ratio", 0.0))) or 0.0),
             }
             for _, row in pat_focal.iterrows()
         ]
@@ -1872,8 +2096,23 @@ def plot_all_focal_amp_trajectories(
         if not regions:
             continue
 
-        entity = entity_from_sample(str(patient))
-        ok = plot_focal_amp_trajectories(
+        # Cap at 6, CGC-gene first then by logR descending
+        if len(regions) > 6:
+            def _region_logr(r: dict) -> float:
+                return float(r.get("logr", 0.0))
+            cgc     = [r for r in regions
+                       if str(r.get("cosmic_genes","")).strip()
+                       and str(r.get("cosmic_genes","")).lower() != "nan"]
+            non_cgc = [r for r in regions if r not in cgc]
+            cgc     = sorted(cgc,     key=_region_logr, reverse=True)
+            non_cgc = sorted(non_cgc, key=_region_logr, reverse=True)
+            regions = (cgc + non_cgc)[:6]
+
+        entity      = entity_from_sample(str(patient))
+        reads_list  = pat_df["total_reads"].tolist() \
+                      if "total_reads" in pat_df.columns else None
+
+        ok, scale_factors = plot_focal_amp_trajectories(
             patient        = str(patient),
             entity         = entity,
             samples        = pat_df["sample"].tolist(),
@@ -1883,11 +2122,239 @@ def plot_all_focal_amp_trajectories(
             focal_regions  = regions,
             output_dir     = output_dir,
             seg_files_segs = seg_files_segs,
+            total_reads    = reads_list,
+            min_reads      = min_reads,
+            max_scale      = max_scale,
         )
         if ok:
             n_plots += 1
             print(f"        {patient}: {len(regions)} focal amp region(s) "
                   f"across {pat_df['timepoint'].nunique()} timepoints")
+
+            # Overlay CN profile plot (filtered samples only)
+            # Re-derive which samples passed the filters using the returned
+            # scale_factors length (matches the filtered sample list)
+            n_passing = len(scale_factors)
+            passing_df = pat_df.iloc[:n_passing] \
+                         if n_passing <= len(pat_df) else pat_df
+            # More robust: re-filter by reads and scale factors
+            _plot_focal_amp_cn_overlay(
+                patient        = str(patient),
+                entity         = entity,
+                samples        = pat_df["sample"].tolist(),
+                timepoints     = pat_df["timepoint"].tolist(),
+                tfs            = pat_df["tumor_fraction"].tolist(),
+                total_reads    = reads_list,
+                scale_factors  = scale_factors,
+                seg_files_segs = seg_files_segs,
+                focal_regions  = regions,
+                output_dir     = output_dir,
+                min_reads      = min_reads,
+                max_scale      = max_scale,
+            )
         gc.collect()
 
     return n_plots
+
+
+def _plot_focal_amp_cn_overlay(
+        patient:        str,
+        entity:         str,
+        samples:        list[str],
+        timepoints:     list[int],
+        tfs:            list[float],
+        total_reads:    list | None,
+        scale_factors:  list[float],
+        seg_files_segs: dict[str, Path] | None,
+        focal_regions:  list[dict],
+        output_dir:     Path,
+        min_reads:      int   = 1_000_000,
+        max_scale:      float = 3.0,
+        logr_ylim:      tuple[float, float] = (-2.5, 2.5),
+) -> None:
+    """
+    Single genome-wide panel overlaying the TF-corrected segment mean CN
+    profiles for all qualifying timepoints of one patient, with focal amp
+    markers at the bottom.  One line per timepoint, coloured from a
+    sequential palette (distinct from the focal amp trajectory palette).
+
+    Samples that fail the reads or scale-factor filter are excluded.
+
+    Written as <patient>_focal_amp_cn_overlay.pdf/.png.
+    """
+    from .plots import _save as _plots_save
+    import matplotlib.patches as mpatches_local
+
+    # Palette for overlay timepoint lines — sequential blue-orange scheme,
+    # deliberately different from the Brown-Teal focal amp colours
+    _OVERLAY_COLORS = [
+        "#1b7837", "#762a83", "#e08214", "#2166ac",
+        "#d6604d", "#35978f", "#bf812d", "#80cdc1",
+    ]
+
+    # Re-apply the same filters as plot_focal_amp_trajectories to
+    # get the matching (sample, tp, tf, scale_factor) tuples.
+    reads_arr = total_reads if total_reads is not None else [None] * len(samples)
+    ref_tf  = max(tfs)
+    ref_idx = tfs.index(ref_tf)
+
+    # scale_factors list has already been filtered — we need to reconstruct
+    # which original samples passed.  Re-derive from the same logic:
+    # ref always passes; others pass if reads >= min_reads and m <= max_scale.
+    # We use scale_factors as provided (already computed & filtered upstream).
+    filt_samples, filt_tps, filt_tfs, filt_m, filt_reads = [], [], [], [], []
+    sf_iter = iter(scale_factors)
+    for i, (samp, tp, tf, reads) in enumerate(
+            zip(samples, timepoints, tfs, reads_arr)):
+        passes_reads = (reads is None or reads >= min_reads)
+        m_val = 1.0 if i == ref_idx else None
+        if i == ref_idx:
+            m_val = 1.0
+        else:
+            try:
+                m_val = next(sf_iter)
+            except StopIteration:
+                break
+        passes_scale = (m_val <= max_scale)
+        if (i == ref_idx or (passes_reads and passes_scale)):
+            filt_samples.append(samp)
+            filt_tps.append(tp)
+            filt_tfs.append(tf)
+            filt_m.append(m_val if m_val is not None else 1.0)
+            filt_reads.append(reads)
+
+    if len(filt_samples) < 1 or seg_files_segs is None:
+        return
+
+    focal_colors = _trajectory_palette(len(focal_regions))
+    focal_labels = []
+    seen: dict[str, int] = {}
+    for region in focal_regions:
+        lbl = _region_label(region)
+        if lbl in seen:
+            seen[lbl] += 1
+            lbl = f"{lbl} ({seen[lbl]})"
+        else:
+            seen[lbl] = 0
+        focal_labels.append(lbl)
+
+    # Build a set of focal amp intervals for red colouring of segs
+    focal_intervals: dict[str, list[tuple[int,int]]] = {}
+    for region in focal_regions:
+        focal_intervals.setdefault(region["chrom"], []).append(
+            (int(region["start"]), int(region["end"]))
+        )
+
+    def _in_focal(chrom: str, start: int, end: int) -> bool:
+        for fs, fe in focal_intervals.get(chrom, []):
+            if start < fe and end > fs:
+                return True
+        return False
+
+    n_colors = len(_OVERLAY_COLORS)
+
+    fig, ax = plt.subplots(figsize=(22, 4.5), facecolor="white")
+    _style_ax(ax)
+    ax.axhline(0,     color="#999999", linewidth=0.7, linestyle="-",  zorder=1)
+    ax.axhline(0.58,  color="#dddddd", linewidth=0.4, linestyle=":", zorder=1)
+    ax.axhline(-0.58, color="#dddddd", linewidth=0.4, linestyle=":", zorder=1)
+
+    line_handles = []
+    for idx, (samp, tp, tf, m) in enumerate(
+            zip(filt_samples, filt_tps, filt_tfs, filt_m)):
+        segs_path = seg_files_segs.get(samp)
+        seg_path  = None  # bins not needed — seg means only
+        # Load seg means using _load_bins_with_seg_means with dummy bins
+        # Actually use parse_seg_file to get segment means directly
+        from ..common.io import parse_seg_file
+        seg_df = parse_seg_file(segs_path, samp) if segs_path else None
+        if seg_df is None or seg_df.empty:
+            continue
+
+        # Apply TF correction (scale by m)
+        logr_col = None
+        for c in ["logr", "seg.mean", "log2_ratio", "median"]:
+            if c in seg_df.columns:
+                logr_col = c
+                break
+        if logr_col is None:
+            continue
+
+        line_color = _OVERLAY_COLORS[idx % n_colors]
+
+        for _, row in seg_df.iterrows():
+            chrom = str(row["chrom"])
+            if not chrom.startswith("chr"):
+                chrom = f"chr{chrom}"
+            if chrom not in _OFFSETS:
+                continue
+            val = float(row[logr_col]) * m
+            x0  = _genome_x(chrom, int(row["start"]))
+            x1  = _genome_x(chrom, int(row["end"]))
+            in_foc = _in_focal(chrom, int(row["start"]), int(row["end"]))
+            # Focal amp segments: draw in red on top; otherwise line colour
+            col = "#d7191c" if in_foc else line_color
+            lw  = 2.0      if in_foc else 1.2
+            ax.plot([x0, x1], [np.clip(val, *logr_ylim)] * 2,
+                    color=col, linewidth=lw,
+                    solid_capstyle="butt", zorder=4 if in_foc else 3,
+                    alpha=0.9)
+
+        reads_str = (f"{int(filt_reads[idx]/1e6):.1f}M reads"
+                     if filt_reads[idx] is not None else "")
+        label = f"TP{tp}  TF={tf:.1%}  ×{m:.2f}  {reads_str}".strip()
+        line_handles.append(
+            plt.Line2D([0], [0], color=line_color, linewidth=2.0, label=label)
+        )
+
+    # Focal amp markers at the bottom
+    marker_y = logr_ylim[0] + 0.35
+    for region, lbl, fc in zip(focal_regions, focal_labels, focal_colors):
+        chrom = region["chrom"]
+        if chrom not in _OFFSETS:
+            continue
+        x0   = _genome_x(chrom, region["start"])
+        x1   = _genome_x(chrom, region["end"])
+        xmid = (x0 + x1) / 2
+        ax.scatter([xmid], [marker_y], marker="^", s=55,
+                   c=[fc], edgecolors="#333333", linewidths=0.4,
+                   zorder=5, clip_on=True)
+        ax.vlines(xmid, marker_y, marker_y + 0.35,
+                  colors=fc, linewidth=1.0, zorder=4)
+        genes = str(region.get("cosmic_genes", "")).strip()
+        gene_label = (genes.split(",")[0].strip()
+                      if genes and genes.lower() != "nan" else lbl)
+        ax.text(xmid, marker_y + 0.42, gene_label,
+                fontsize=5.5, color=fc, ha="center", va="bottom",
+                fontweight="bold", zorder=6, clip_on=True)
+
+    ax.set_ylim(logr_ylim)
+    ax.set_ylabel("TF-corrected log2 ratio", fontsize=9,
+                  color="#444444", labelpad=5)
+    ax.yaxis.set_major_locator(mticker.MultipleLocator(1.0))
+    ax.yaxis.set_major_formatter(mticker.FormatStrFormatter("%.0f"))
+
+    # Legend: timepoint lines + focal amp triangles
+    focal_handles = [
+        plt.Line2D([0], [0], marker="^", color="w",
+                   markerfacecolor=fc, markeredgecolor="#333333",
+                   markersize=7, label=lbl)
+        for fc, lbl in zip(focal_colors, focal_labels)
+    ]
+    all_handles = line_handles + [
+        plt.Line2D([0], [0], color="#d7191c", linewidth=2.0,
+                   label="Focal amp segment (all TPs)")
+    ] + focal_handles
+    ax.legend(handles=all_handles, fontsize=7, loc="upper right",
+              ncol=max(1, len(all_handles) // 4),
+              frameon=True, facecolor="white", edgecolor="#cccccc",
+              labelcolor="#222222",
+              title=f"{patient}  ({entity})  overlay — one line per timepoint",
+              title_fontsize=7.5)
+
+    fig.suptitle(
+        f"{patient}  ({entity})   CN profile overlay — all qualifying timepoints",
+        fontsize=10, fontweight="bold", color="#222222",
+    )
+    fig.tight_layout()
+    _plots_save(fig, output_dir / f"{patient}_focal_amp_cn_overlay")
