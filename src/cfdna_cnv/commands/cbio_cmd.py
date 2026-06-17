@@ -198,12 +198,23 @@ def run(args: argparse.Namespace) -> None:
         freq_focal.to_csv(freq_out, sep='\t', index=False)
         print(f"      Written: {freq_out}  ({len(freq_focal)} regions)")
 
-        # Build a tf_tsv for the plot function
+        # Build a tf_tsv for the plot function.
+        # cbio_tf_df already has the correct 'entity' column set from the
+        # input file names — the plot function must use this directly rather
+        # than deriving entity from the patient ID first letter (which only
+        # works for ichorCNA patient IDs like B12, P34, C56).
         tf_tsv = outdir / 'cbio_tf_summary.tsv'
         cbio_tf_df.to_csv(tf_tsv, sep='\t', index=False)
+
+        # Capitalise entity names to match ICHORCNA_ENTITY_PALETTE keys
+        cbio_tf_df_plot = cbio_tf_df.copy()
+        cbio_tf_df_plot['entity'] = cbio_tf_df_plot['entity'].str.capitalize()
+        tf_tsv_plot = outdir / 'cbio_tf_summary_plot.tsv'
+        cbio_tf_df_plot.to_csv(tf_tsv_plot, sep='\t', index=False)
+
         plot_focal_amp_ichorcna(
             focal_freq_tsv = freq_out,
-            tf_tsv         = tf_tsv,
+            tf_tsv         = tf_tsv_plot,
             output_path    = outdir / 'focal_amp_frequencies_plot',
             min_freq       = getattr(args, 'focal_min_freq', 0.0),
         )

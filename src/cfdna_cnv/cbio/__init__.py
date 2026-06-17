@@ -4,5 +4,5 @@ from .frequencies import (  # noqa: F401
     detect_focal_amps_cbio,
     compute_focal_amp_frequencies,
 )
-from .plots import plot_cna_frequencies, plot_focal_amp_frequencies  # noqa: F401
+from .plots import plot_cna_frequencies  # noqa: F401
 from .liftover import liftover_seg_df, liftover_entity_files  # noqa: F401

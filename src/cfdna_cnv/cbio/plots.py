@@ -1,5 +1,11 @@
 """
 Genome-wide CNA and focal amplification frequency plots for cBioPortal data.
+
+Note: focal amplification frequency plots for cBioPortal data use the same
+function as ichorCNA data — plot_focal_amp_frequencies from ichorcna/plots.py
+— so the colour scheme and bar-style rendering are identical across both
+data sources.  The old lollipop-style plot previously defined here has been
+removed.
 """
 from __future__ import annotations
 
@@ -57,7 +63,7 @@ def _style_ax(ax: plt.Axes) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Broad CNA frequency plot
+# Broad CNA frequency plot (broad gains/losses — retained)
 # ---------------------------------------------------------------------------
 
 def plot_cna_frequencies(
@@ -114,89 +120,4 @@ def plot_cna_frequencies(
 
     fig.suptitle("Genome-Wide Copy-Number Frequencies",
                  fontsize=14, fontweight="bold", color="#222222", y=0.98)
-    _save(fig, output_path)
-
-
-# ---------------------------------------------------------------------------
-# Focal amplification lollipop plot
-# ---------------------------------------------------------------------------
-
-def plot_focal_amp_frequencies(
-        focal_freq_df: pd.DataFrame,
-        entity:        str,
-        output_path:   Path,
-        min_freq:      float = 0.01,
-        top_n_labels:  int   = 30,
-) -> None:
-    """
-    Genome-wide lollipop plot of focal amplification frequencies.
-    Loci overlapping COSMIC CGC genes are highlighted and labelled.
-    """
-    pal   = ENTITY_PALETTE.get(entity, {
-        "gain": "#e63946", "label": entity.title()
-    })
-    df    = focal_freq_df[focal_freq_df["frequency"] >= min_freq].copy()
-    df    = df[df["chrom"].isin(_OFFSETS)].copy()
-    if df.empty:
-        print(f"      [{entity}] No focal amps >= {min_freq:.0%} — skipping plot.")
-        return
-
-    df["mid_genome"] = df.apply(
-        lambda r: _OFFSETS[r["chrom"]] + (r["start"] + r["end"]) / 2, axis=1
-    )
-    df["has_gene"] = (
-        df.get("cosmic_genes", pd.Series("", index=df.index))
-          .fillna("").astype(str) != ""
-    )
-
-    fig, ax = plt.subplots(figsize=(22, 5), facecolor="white")
-    _style_ax(ax)
-
-    for _, row in df.iterrows():
-        x     = row["mid_genome"]
-        freq  = row["frequency"]
-        color = "#d7191c" if row["has_gene"] else "#2c7bb6"
-        ax.vlines(x, 0, freq, colors=color, linewidth=1.2, alpha=0.7, zorder=2)
-        ax.scatter(x, freq, color=color, s=18, zorder=3,
-                   edgecolors="none", alpha=0.9)
-
-    # Label top COSMIC-gene loci (non-overlapping)
-    labelled  = df[df["has_gene"]].nlargest(top_n_labels, "frequency")
-    label_xs: list[float] = []
-    label_gap = GENOME_SIZE * 0.012
-
-    for _, row in labelled.iterrows():
-        x    = row["mid_genome"]
-        freq = row["frequency"]
-        gene = str(row.get("cosmic_genes", ""))
-        if not gene or gene == "nan":
-            continue
-        if any(abs(x - lx) < label_gap for lx in label_xs):
-            continue
-        label_xs.append(x)
-        ax.text(x, freq + 0.015, gene.split(",")[0],
-                fontsize=6.5, color="#d7191c",
-                ha="center", va="bottom", rotation=90,
-                fontweight="bold", zorder=4)
-
-    ax.set_ylim(-0.04, min(1.05, df["frequency"].max() * 1.35 + 0.05))
-    ax.yaxis.set_major_formatter(mticker.PercentFormatter(xmax=1, decimals=0))
-    ax.set_ylabel("Patients with focal amp (%%)", fontsize=9, color="#444444")
-
-    n_pts  = int(df["n_total"].iloc[0])
-    n_loci = len(df)
-    ax.set_title(
-        f"{pal['label']}  —  Focal Amplification Frequencies   "
-        f"(n = {n_pts} patients, {n_loci} loci >= {min_freq*100:.0f}%%)",
-        fontsize=11, fontweight="bold", color="#222222", pad=8, loc="left"
-    )
-    handles = [
-        mpatches.Patch(color="#2c7bb6", label="Focal amp (no known CGC driver)"),
-        mpatches.Patch(color="#d7191c", label="Overlaps COSMIC CGC driver gene"),
-    ]
-    ax.legend(handles=handles, fontsize=8, loc="lower left",
-              facecolor="white", edgecolor="#cccccc",
-              labelcolor="#222222", framealpha=0.85)
-
-    fig.tight_layout()
     _save(fig, output_path)

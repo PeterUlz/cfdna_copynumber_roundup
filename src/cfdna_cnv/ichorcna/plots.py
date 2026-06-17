@@ -258,7 +258,14 @@ def plot_focal_amp_frequencies(
 
     pat_col = "patients" if "patients" in freq_df.columns else "samples"
 
-    tf_df["entity"] = tf_df["patient"].apply(lambda p: entity_from_sample(str(p)))
+    # Use entity column if already present (e.g. cBioPortal data where
+    # patient IDs don't follow the B/P/C naming convention), else derive.
+    if "entity" in tf_df.columns and tf_df["entity"].notna().any():
+        tf_df = tf_df.copy()
+        tf_df["entity"] = tf_df["entity"].str.capitalize()
+    else:
+        tf_df["entity"] = tf_df["patient"].apply(
+            lambda p: entity_from_sample(str(p)))
 
     # The 'patients' column stores patient IDs (e.g. B85, P10).
     # Match against tf_df["patient"] — not tf_df["sample"].
