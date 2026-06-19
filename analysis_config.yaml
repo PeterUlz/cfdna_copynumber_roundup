@@ -33,7 +33,7 @@ focal:
   noise-factor:         2.0     # Segment logR must be ≥ noise_factor × noise
   max-focal-per-sample: 50       # Discard samples with > N focal amps
   freq-min-freq:        0.0     # Min patient frequency for frequency plot
-  amp-diagnostics:      true #true   # Generate per-sample diagnostic plots
+  amp-diagnostics:      false #true   # Generate per-sample diagnostic plots
 
 # ── Broad CNA plot ───────────────────────────────────────────────────────────
 plot:

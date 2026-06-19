@@ -1572,15 +1572,35 @@ def _trajectory_palette(n: int) -> list:
     """
     Return colours for focal amp trajectory lines and genome map boxes.
 
-    Fixed 6-colour Brown-Teal diverging palette. Beyond 6 regions, extra
-    colours fall back to tab20 (the 6-per-patient cap makes this unlikely).
+    Fixed 10-colour Red-Blue diverging palette. When n < 10, colours are
+    picked from the outside in (positions 1, 10, 2, 9, 3, 8, ...) so the
+    most visually distinct (most saturated) colours are used first,
+    keeping the near-identical centre colours (#fddbc7, #d1e5f0) reserved
+    for when there really are close to 10 regions.
+
+    Beyond 10 regions, extra colours fall back to tab20 (the 10-per-patient
+    cap makes this unreachable in practice).
     """
-    _FIXED = ["#8c510a", "#d8b365", "#f6e8c3", "#c7eae5", "#5ab4ac", "#01665e"]
-    if n <= len(_FIXED):
-        return _FIXED[:n]
-    extra = n - len(_FIXED)
-    cmap  = plt.colormaps.get_cmap("tab20")
-    return _FIXED + [cmap(i) for i in range(extra)]
+    _FIXED = [
+        "#67001f", "#b2182b", "#d6604d", "#f4a582", "#fddbc7",
+        "#d1e5f0", "#92c5de", "#4393c3", "#2166ac", "#053061",
+    ]
+    if n >= len(_FIXED):
+        extra = n - len(_FIXED)
+        cmap  = plt.colormaps.get_cmap("tab20")
+        return _FIXED + [cmap(i) for i in range(extra)]
+
+    # Outside-in index order: 0, 9, 1, 8, 2, 7, 3, 6, 4, 5
+    order = []
+    lo, hi = 0, len(_FIXED) - 1
+    while lo <= hi:
+        order.append(lo)
+        if hi != lo:
+            order.append(hi)
+        lo += 1
+        hi -= 1
+    selected_idx = sorted(order[:n])   # keep palette's natural colour order
+    return [_FIXED[i] for i in selected_idx]
 
 
 def plot_focal_amp_trajectories(
@@ -1700,6 +1720,11 @@ def plot_focal_amp_trajectories(
     if len(samples) < 2:
         print(f"        {patient}: fewer than 2 samples pass filters — skipping.")
         return False, []
+
+    # Recompute ref_idx and ref_tf against the filtered sample list
+    ref_tf  = max(tfs)
+    ref_idx = tfs.index(ref_tf)
+
     log2_matrix = np.full((len(samples), len(focal_regions)), np.nan)
     log2_q1     = np.full((len(samples), len(focal_regions)), np.nan)
     log2_q3     = np.full((len(samples), len(focal_regions)), np.nan)
@@ -1735,12 +1760,37 @@ def plot_focal_amp_trajectories(
     x         = timepoints
     tp_labels = [f"TP{tp}" for tp in timepoints]
 
+    # ── Write per-patient metadata TSV ───────────────────────────────────
+    # Contains the information previously crammed into the plot title:
+    # timepoint, sample, TF, reads, scale factor, CN per focal amp region.
+    reads_arr = total_reads if total_reads is not None else [None] * len(samples)
+    meta_rows = []
+    for i, (samp, tp, tf, m) in enumerate(
+            zip(samples, timepoints, tfs, scale_factors)):
+        row: dict = {
+            "patient":          patient,
+            "sample":           samp,
+            "timepoint":        tp,
+            "tumor_fraction":   round(tf, 4),
+            "scale_factor":     round(m, 4),
+            "is_reference":     (m == 1.0),
+            "total_reads":      reads_arr[i] if i < len(reads_arr) else None,
+        }
+        for j, (region, lbl) in enumerate(zip(focal_regions, labels)):
+            cn_val  = round(float(cn_matrix[i, j]),  3) \
+                      if not np.isnan(cn_matrix[i, j])  else None
+            log_val = round(float(log2_matrix[i, j]), 3) \
+                      if not np.isnan(log2_matrix[i, j]) else None
+            row[f"log2r_{lbl}"] = log_val
+            row[f"cn_{lbl}"]    = cn_val
+        meta_rows.append(row)
+
+    meta_df = pd.DataFrame(meta_rows)
+    meta_tsv = output_dir / f"{patient}_focal_amp_metadata.tsv"
+    meta_df.to_csv(meta_tsv, sep="\t", index=False)
+
+    # ── Short title for the plots (patient + entity only) ────────────────
     title_main = f"{patient}  ({entity})   Focal amplification trajectories"
-    title_sub  = "   ".join(
-        f"TP{tp} (TF={tf:.1%}, \u00d7{m:.2f})"
-        for tp, tf, m in zip(timepoints, tfs, scale_factors)
-    ) + (f"     [common scale: TP{timepoints[ref_idx]} is reference "
-         f"(TF={ref_tf:.1%}); error bars = IQR of bins in segment]")
 
     def _new_axes():
         fig, ax = plt.subplots(figsize=(8.5, 5.0), facecolor="white")
@@ -1751,8 +1801,8 @@ def plot_focal_amp_trajectories(
         ax.set_xticks(x)
         ax.set_xticklabels(tp_labels)
         ax.set_xlabel("Timepoint", fontsize=9, color="#444444")
-        ax.set_title(f"{title_main}\n{title_sub}", fontsize=10,
-                      fontweight="bold", color="#222222", loc="left")
+        ax.set_title(title_main, fontsize=10,
+                     fontweight="bold", color="#222222", loc="left")
         return fig, ax
 
     def _plot_lines(ax, matrix, q1_matrix, q3_matrix):
@@ -1850,6 +1900,7 @@ def _plot_focal_amp_genome_map(
         facecolor="white",
         sharex=True,
         gridspec_kw={"hspace": 0.45},
+        constrained_layout=True,
     )
     if n_tp == 1:
         axes = [axes]
@@ -2008,9 +2059,9 @@ def _plot_focal_amp_genome_map(
 
     fig.suptitle(
         f"{patient}  ({entity})   Focal amplification genome map",
-        fontsize=11, fontweight="bold", color="#222222", y=1.01,
+        fontsize=11, fontweight="bold", color="#222222",
     )
-    fig.tight_layout()
+    # constrained_layout handles spacing automatically
     _plots_save(fig, output_dir / f"{patient}_focal_amp_genome_map")
 
 
@@ -2096,17 +2147,12 @@ def plot_all_focal_amp_trajectories(
         if not regions:
             continue
 
-        # Cap at 6, CGC-gene first then by logR descending
-        if len(regions) > 6:
+        # Cap at 10 regions (matches the 10-colour palette), selecting
+        # the highest copy-number (logR) regions.
+        if len(regions) > 10:
             def _region_logr(r: dict) -> float:
                 return float(r.get("logr", 0.0))
-            cgc     = [r for r in regions
-                       if str(r.get("cosmic_genes","")).strip()
-                       and str(r.get("cosmic_genes","")).lower() != "nan"]
-            non_cgc = [r for r in regions if r not in cgc]
-            cgc     = sorted(cgc,     key=_region_logr, reverse=True)
-            non_cgc = sorted(non_cgc, key=_region_logr, reverse=True)
-            regions = (cgc + non_cgc)[:6]
+            regions = sorted(regions, key=_region_logr, reverse=True)[:10]
 
         entity      = entity_from_sample(str(patient))
         reads_list  = pat_df["total_reads"].tolist() \
@@ -2186,7 +2232,7 @@ def _plot_focal_amp_cn_overlay(
     import matplotlib.patches as mpatches_local
 
     # Palette for overlay timepoint lines — sequential blue-orange scheme,
-    # deliberately different from the Brown-Teal focal amp colours
+    # deliberately different from the Red-Blue focal amp colours
     _OVERLAY_COLORS = [
         "#1b7837", "#762a83", "#e08214", "#2166ac",
         "#d6604d", "#35978f", "#bf812d", "#80cdc1",
