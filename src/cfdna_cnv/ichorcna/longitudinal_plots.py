@@ -1216,6 +1216,19 @@ def plot_all_pairwise_longitudinal(
             n_plots += 1
             gc.collect()
 
+
+        # Per-patient scaling diagnostics (after all pairs for this patient)
+        _scaling_diagnostic_plots(
+            patient        = str(patient),
+            entity         = entity,
+            samples        = samples,
+            timepoints     = timepoints,
+            tfs            = tfs,
+            seg_files_bins = seg_files,
+            seg_files_segs = seg_files_segs,
+            output_dir     = output_dir,
+        )
+        gc.collect()
     return n_plots
 
 
@@ -1633,10 +1646,15 @@ def plot_focal_amp_trajectories(
     use the computed scale factors for downstream plots.
     """
     if len(samples) < 2 or not focal_regions:
+        print(f"        [SKIP] {patient}: {len(samples)} sample(s), "
+              f"{len(focal_regions)} focal region(s) — need >= 2 samples "
+              f"and >= 1 region")
         return False, []
 
     ref_tf = max(tfs)
     if ref_tf <= 0:
+        print(f"        [SKIP] {patient}: max TF = {ref_tf} — no valid "
+              f"reference sample")
         return False, []
     ref_idx = tfs.index(ref_tf)
 
@@ -1748,6 +1766,8 @@ def plot_focal_amp_trajectories(
             log2_q3[i, j]     = q3
 
     if np.all(np.isnan(log2_matrix)):
+        print(f"        [SKIP] {patient}: no bin data could be loaded for "
+              f"any sample/region combination")
         return False, []
 
     cn_matrix = 2.0 * np.power(2.0, log2_matrix)
@@ -2119,16 +2139,28 @@ def plot_all_focal_amp_trajectories(
     df["timepoint"] = df["timepoint"].astype(int)
     df = df[df["sample"].isin(seg_files_bins)]
 
+    n_patients_total   = df["patient"].nunique()
+    n_patients_seg     = df[df["sample"].isin(seg_files_bins)]["patient"].nunique()
+    print(f"      [focal trajectories] {n_patients_total} patients with "
+          f"TF >= {min_tf:.0%} in tf_df; {n_patients_seg} have seg files")
+    print(f"      [focal trajectories] {len(focal_samples)} samples with "
+          f"focal amp events in focal_amplifications.tsv")
+
     output_dir.mkdir(parents=True, exist_ok=True)
     n_plots = 0
 
     for patient, pat_df in df.groupby("patient"):
         pat_df = pat_df.sort_values("timepoint")
-        if pat_df["timepoint"].nunique() < min_timepoints:
+        n_tp = pat_df["timepoint"].nunique()
+        if n_tp < min_timepoints:
+            print(f"      [SKIP] {patient}: only {n_tp} qualifying timepoint(s) "
+                  f"(need >= {min_timepoints}, TF >= {min_tf:.0%})")
             continue
 
         pat_samples = set(pat_df["sample"])
         if not (pat_samples & focal_samples):
+            print(f"      [SKIP] {patient}: no focal amplifications detected "
+                  f"in any of {len(pat_samples)} qualifying sample(s)")
             continue
 
         pat_focal = focal_df[focal_df["sample"].isin(pat_samples)]
@@ -2145,6 +2177,8 @@ def plot_all_focal_amp_trajectories(
         ]
         regions = _merge_overlapping(regions)
         if not regions:
+            print(f"      [SKIP] {patient}: focal amp events found but no "
+                  f"regions survived merging/filtering")
             continue
 
         # Cap at 10 regions (matches the 10-colour palette), selecting
@@ -2174,8 +2208,9 @@ def plot_all_focal_amp_trajectories(
         )
         if ok:
             n_plots += 1
-            print(f"        {patient}: {len(regions)} focal amp region(s) "
-                  f"across {pat_df['timepoint'].nunique()} timepoints")
+            print(f"      [OK]   {patient}: {len(regions)} focal amp region(s) "
+                  f"across {pat_df['timepoint'].nunique()} timepoints "
+                  f"({len(scale_factors)} pass all filters)")
 
             # Overlay CN profile plot (filtered samples only)
             # Re-derive which samples passed the filters using the returned
@@ -2404,3 +2439,244 @@ def _plot_focal_amp_cn_overlay(
     )
     fig.tight_layout()
     _plots_save(fig, output_dir / f"{patient}_focal_amp_cn_overlay")
+
+
+# ---------------------------------------------------------------------------
+# Longitudinal scaling diagnostic plots
+# ---------------------------------------------------------------------------
+
+def _scaling_diagnostic_plots(
+        patient:        str,
+        entity:         str,
+        samples:        list[str],
+        timepoints:     list[int],
+        tfs:            list[float],
+        seg_files_bins: dict[str, Path],
+        seg_files_segs: dict[str, Path] | None,
+        output_dir:     Path,
+        min_abs:        float = 0.05,
+        logr_ylim:      tuple[float, float] = (-2.5, 2.5),
+) -> None:
+    """
+    Two per-patient diagnostic plots for the empirical TF-correction scaling.
+
+    Plot 1: Scatter — log2 ratio before vs after correction (one panel per
+    timepoint pair, coloured by timepoint). Shows how well the scaling aligns
+    the two samples. Reference (highest-TF) timepoint is grey.
+
+    Plot 2: Weight distribution — genome-wide scatter of the WLS weights
+    (w = |logR_reference|) used in the scale-factor fit. Reveals which
+    genomic regions drive the estimate.
+
+    Both plots are written to <output_dir>/scaling_diagnostics/.
+    """
+    from .plots import _save as _plots_save
+
+    if len(samples) < 2:
+        return
+
+    ref_tf  = max(tfs)
+    ref_idx = tfs.index(ref_tf)
+    ref_samp = samples[ref_idx]
+
+    # ── Colour palette for timepoints (avoid red/blue reserved for CN) ───
+    _TP_COLORS = [
+        "#1b7837", "#762a83", "#e08214", "#2166ac",
+        "#d6604d", "#35978f", "#bf812d", "#80cdc1",
+    ]
+    n = len(samples)
+    tp_colors = {s: ("#bbbbbb" if i == ref_idx
+                     else _TP_COLORS[(i if i < ref_idx else i - 1) % len(_TP_COLORS)])
+                 for i, s in enumerate(samples)}
+
+    diag_dir = output_dir / "scaling_diagnostics"
+    diag_dir.mkdir(parents=True, exist_ok=True)
+
+    # Load reference bins (raw, unscaled)
+    ref_seg_path  = seg_files_bins.get(ref_samp)
+    ref_segs_path = seg_files_segs.get(ref_samp) if seg_files_segs else None
+    if ref_seg_path is None:
+        return
+
+    ref_bins = _load_bins(ref_seg_path, ref_samp, tf_from=ref_tf)
+    if ref_bins is None or ref_bins.empty:
+        return
+
+    # Load reference segment means for weight computation and scaling fit
+    ref_segmeans = None
+    if ref_segs_path is not None:
+        ref_segmeans = _load_bins_with_seg_means(
+            ref_seg_path, ref_segs_path, ref_samp, tf_from=ref_tf
+        )
+
+    # ── Compute per-non-ref timepoint scale factors and aligned data ─────
+    # We store: (sample, tp, tf, raw_aligned_df, scaled_aligned_df, weight_df, m)
+    comparisons = []
+    for i, (samp, tp, tf) in enumerate(zip(samples, timepoints, tfs)):
+        if i == ref_idx:
+            continue
+        seg_path  = seg_files_bins.get(samp)
+        segs_path = seg_files_segs.get(samp) if seg_files_segs else None
+        if seg_path is None:
+            continue
+
+        samp_bins = _load_bins(seg_path, samp, tf_from=tf)
+        if samp_bins is None or samp_bins.empty:
+            continue
+
+        # Align reference and sample segment means for scaling
+        m = 1.0
+        if ref_segmeans is not None and segs_path is not None:
+            samp_segmeans = _load_bins_with_seg_means(
+                seg_path, segs_path, samp, tf_from=tf
+            )
+            if samp_segmeans is not None and not samp_segmeans.empty:
+                aligned = _align_bins(ref_segmeans, samp_segmeans)
+                if not aligned.empty:
+                    m, _ = _optimise_scaling(
+                        aligned["logr_a"].values,
+                        aligned["logr_b"].values,
+                        min_abs=min_abs,
+                    )
+
+        # Align raw bins for scatter plots
+        raw_aligned = _align_bins(ref_bins, samp_bins)
+        if raw_aligned.empty:
+            continue
+
+        # Scaled version
+        samp_bins_scaled = samp_bins.copy()
+        samp_bins_scaled["logr_corrected"] *= m
+        scaled_aligned = _align_bins(ref_bins, samp_bins_scaled)
+
+        # Weights: |logR_reference| on the segment-mean aligned data
+        if ref_segmeans is not None and segs_path is not None:
+            samp_segmeans = _load_bins_with_seg_means(
+                seg_path, segs_path, samp, tf_from=tf
+            )
+            if samp_segmeans is not None and not samp_segmeans.empty:
+                w_aligned = _align_bins(ref_segmeans, samp_segmeans)
+                w_aligned["weight"] = np.abs(w_aligned["logr_a"])
+                w_aligned = w_aligned[w_aligned["weight"] >= min_abs]
+            else:
+                w_aligned = None
+        else:
+            # Fall back to raw bin weights
+            w_aligned = raw_aligned.copy()
+            w_aligned["weight"] = np.abs(w_aligned["logr_a"])
+            w_aligned = w_aligned[w_aligned["weight"] >= min_abs]
+
+        comparisons.append((samp, tp, tf, raw_aligned, scaled_aligned,
+                             w_aligned, m))
+
+    if not comparisons:
+        return
+
+    # ── Plot 1: Before/After correction scatter ──────────────────────────
+    # One row per non-reference timepoint, two columns (before / after).
+    n_comp = len(comparisons)
+    fig, axes = plt.subplots(
+        n_comp, 2,
+        figsize=(9, 3.5 * n_comp),
+        facecolor="white",
+        constrained_layout=True,
+    )
+    if n_comp == 1:
+        axes = [axes]   # make always a list of rows
+
+    for row_idx, (samp, tp, tf, raw_al, scl_al, _, m) in enumerate(comparisons):
+        color = tp_colors[samp]
+        ref_label = f"TP{timepoints[ref_idx]} (ref, TF={ref_tf:.1%})"
+        samp_label = f"TP{tp}  TF={tf:.1%}"
+
+        for col_idx, (al, ttl) in enumerate([
+            (raw_al,  f"Before correction  (m=1.00)\n{samp_label}"),
+            (scl_al,  f"After correction   (m={m:.2f})\n{samp_label}"),
+        ]):
+            ax = axes[row_idx][col_idx]
+            ax.set_facecolor("white")
+            for spine in ax.spines.values():
+                spine.set_edgecolor("#cccccc"); spine.set_linewidth(0.5)
+
+            lf = np.clip(al["logr_a"].values, *logr_ylim)
+            la = np.clip(al["logr_b"].values, *logr_ylim)
+            ax.scatter(lf, la, s=1.5, c=color, alpha=0.3,
+                       linewidths=0, rasterized=True, zorder=2)
+
+            # y=x reference line
+            lim = logr_ylim
+            ax.plot(lim, lim, color="#999999", linewidth=0.8,
+                    linestyle="--", zorder=3)
+            # Regression line through origin (slope = m_applied)
+            m_applied = 1.0 if col_idx == 0 else m
+            ax.plot(lim, [v * m_applied for v in lim],
+                    color=color, linewidth=1.2, linestyle="-", zorder=4)
+
+            ax.set_xlim(logr_ylim); ax.set_ylim(logr_ylim)
+            ax.set_xlabel(f"log2R  {ref_label}", fontsize=7.5,
+                          color="#444444")
+            ax.set_ylabel(f"log2R  {samp_label}", fontsize=7.5,
+                          color="#444444")
+            ax.set_title(ttl, fontsize=8, color="#222222",
+                         fontweight="bold", loc="left")
+            ax.axhline(0, color="#cccccc", linewidth=0.5)
+            ax.axvline(0, color="#cccccc", linewidth=0.5)
+
+            # Correlation annotation
+            mask = np.isfinite(lf) & np.isfinite(la)
+            if mask.sum() > 10:
+                r = float(np.corrcoef(lf[mask], la[mask])[0, 1])
+                ax.text(0.97, 0.04, f"r = {r:.3f}", transform=ax.transAxes,
+                        fontsize=7, ha="right", va="bottom", color="#444444")
+
+    fig.suptitle(
+        f"{patient}  ({entity})   Log2R before/after TF correction",
+        fontsize=10, fontweight="bold", color="#222222",
+    )
+    _plots_save(fig, diag_dir / f"{patient}_scaling_scatter")
+
+    # ── Plot 2: Weight distribution genome-wide ──────────────────────────
+    # One panel per non-reference timepoint: x = genome position,
+    # y = WLS weight (|logR_reference|) at the segment level.
+    fig2, axes2 = plt.subplots(
+        n_comp, 1,
+        figsize=(22, 3.0 * n_comp),
+        facecolor="white",
+        sharex=True,
+        constrained_layout=True,
+    )
+    if n_comp == 1:
+        axes2 = [axes2]
+
+    for row_idx, (samp, tp, tf, _, _, w_al, m) in enumerate(comparisons):
+        ax = axes2[row_idx]
+        _style_ax(ax)
+        ax.axhline(min_abs, color="#cccccc", linewidth=0.6,
+                   linestyle=":", zorder=1,
+                   label=f"min_abs threshold ({min_abs})")
+
+        color = tp_colors[samp]
+
+        if w_al is not None and not w_al.empty:
+            xv = w_al.apply(
+                lambda r: _genome_x(r["chrom"],
+                                    (r["start"] + r["end"]) / 2), axis=1
+            ).values
+            yv = w_al["weight"].values
+            ax.scatter(xv, yv, s=2.5, c=color, alpha=0.5,
+                       linewidths=0, zorder=2, rasterized=True)
+
+        ax.set_ylim(bottom=0)
+        ax.set_ylabel(f"Weight\n|logR ref|", fontsize=8,
+                      color="#444444", labelpad=4)
+        ax.set_title(
+            f"TP{tp}  {samp}  (TF={tf:.1%}, scale ×{m:.2f})"
+            f"  —  WLS weights used in scale-factor fit",
+            fontsize=8, fontweight="bold", color="#222222", loc="left",
+        )
+
+    fig2.suptitle(
+        f"{patient}  ({entity})   WLS weight distribution",
+        fontsize=10, fontweight="bold", color="#222222",
+    )
+    _plots_save(fig2, diag_dir / f"{patient}_scaling_weights")
