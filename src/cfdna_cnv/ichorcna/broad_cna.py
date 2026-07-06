@@ -41,6 +41,7 @@ def stream_broad_cna_frequencies(
         sample_entity:   dict[str, str] | None = None,
         bin_size:        int = 1_000_000,
         tf_df:           "pd.DataFrame | None" = None,
+        min_abs_log2r:   float = 0.2,
 ) -> pd.DataFrame:
     """
     Compute per-bin AMP/DEL frequencies across all high-TF samples, streaming
@@ -48,8 +49,9 @@ def stream_broad_cna_frequencies(
 
     Each segment is mapped to all fixed-size bins it overlaps. A bin is
     counted as AMP (or DEL) for a sample if any of that sample's segments
-    covering the bin carry that call. This produces one row per bin rather
-    than one row per unique (start, end) pair.
+    covering the bin carry that call AND have |log2R| > min_abs_log2r
+    (default 0.2). This prevents very shallow gains/losses (often noise or
+    tumour-fraction artefacts) from inflating frequencies.
 
     When tf_df is provided, only the highest-TF sample per patient is used,
     so frequencies are computed at the patient level rather than sample level.
@@ -65,6 +67,10 @@ def stream_broad_cna_frequencies(
     tf_df           : tumor fraction table (columns: sample, patient,
                       tumor_fraction). When provided, one representative
                       sample per patient is selected (highest TF).
+    min_abs_log2r   : minimum absolute log2 ratio for a segment to be
+                      counted (default 0.2). Segments with |log2R| below
+                      this threshold are treated as NEUTRAL regardless of
+                      their call label.
 
     Returns
     -------
@@ -149,6 +155,12 @@ def stream_broad_cna_frequencies(
             continue
 
         df["alteration"] = df.apply(call_alteration, axis=1)
+
+        # Apply |log2R| > min_abs_log2r filter.
+        # Retrieve the log2 ratio column for this sample (same candidates
+        # used by call_alteration as fallback).
+        log2_col = next((c for c in LOG2_COL_CANDIDATES if c in df.columns), None)
+
         ent = sample_entity.get(sample, "Other") if use_entities else None
 
         # Track which bins this sample has already been counted in to avoid
@@ -160,6 +172,11 @@ def stream_broad_cna_frequencies(
             alt = row["alteration"]
             if alt is None or alt == "NEUTRAL":
                 continue
+
+            # Skip segments whose log2R magnitude is below the threshold
+            if log2_col is not None and pd.notna(row.get(log2_col)):
+                if abs(float(row[log2_col])) < min_abs_log2r:
+                    continue
             chrom = row["chrom"]
             if chrom not in CHROM_LENGTHS:
                 continue

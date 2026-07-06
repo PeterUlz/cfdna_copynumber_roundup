@@ -1,9 +1,15 @@
 """
 cfdna-cnv  —  cfDNA copy-number analysis toolkit
 
-Subcommands:
+Full pipeline:
     ichorcna   Analyze ichorCNA output (broad CNA + focal amps + longitudinal)
     cbio       Analyze cBioPortal segmentation files (broad CNA + focal amps)
+
+Focused commands (ichorCNA data):
+    focal-amps       Detect and plot focal amplifications across a cohort
+    compare          Pairwise longitudinal CN comparison for two timepoints
+    trajectories     CN trajectories of focal amps across patient timepoints
+    signatures       Copy-number signature analysis (sigminer)
 """
 from __future__ import annotations
 
@@ -20,185 +26,389 @@ def _add_cosmic_arg(p: argparse.ArgumentParser) -> None:
     )
 
 
+def _add_common_ichorcna_args(p: argparse.ArgumentParser) -> None:
+    """Args shared by all ichorCNA-based subcommands."""
+    p.add_argument("--config", default=None, metavar="FILE",
+                   help="YAML config file. CLI arguments override config values.")
+    p.add_argument("--write-config", default=None, metavar="FILE",
+                   help="Write a default config YAML to FILE and exit.")
+    p.add_argument("--tf-threshold", type=float, default=0.03,
+                   help="Minimum tumor fraction (default 3%%).")
+    p.add_argument("--min-reads", type=int, default=1_000_000,
+                   help="Minimum total reads from WIG file (default 1,000,000). "
+                        "Set to 0 to disable.")
+    p.add_argument("--exclude-entities", nargs="+", default=[], metavar="ENTITY",
+                   help="Entity names to exclude (Breast, Colorectal, Prostate, "
+                        "Lung, Ovarian, Other).")
+    p.add_argument("--rscript", default="Rscript", metavar="BIN",
+                   help="Path to Rscript binary (default: Rscript).")
+    _add_cosmic_arg(p)
+
+
+def _add_focal_amp_args(p: argparse.ArgumentParser) -> None:
+    """Focal amp detection args shared by several subcommands."""
+    p.add_argument("--amp-min-cn",          type=int,   default=4,
+                   help="Minimum CN for focal amp (default 4).")
+    p.add_argument("--focal-min-bp",        type=int,   default=50_000,
+                   help="Minimum focal amp segment size in bp (default 50,000).")
+    p.add_argument("--focal-max-bp",        type=int,   default=500_000,
+                   help="Maximum focal amp segment size in bp (default 500,000).")
+    p.add_argument("--focal-min-bins",      type=int,   default=3,
+                   help="Minimum 50 kbp bins in a segment (default 3).")
+    p.add_argument("--focal-flank-bins",    type=int,   default=2,
+                   help="Background window: this many 1 Mbp bins each side "
+                        "(default 2).")
+    p.add_argument("--max-focal-per-sample",type=int,   default=5,
+                   help="Discard samples with more focal amps than this "
+                        "(default 5).")
+    p.add_argument("--focal-noise-factor",  type=float, default=2.0,
+                   help="Segment logR must be >= this × sample noise "
+                        "(default 2.0).")
+    p.add_argument("--focal-freq-min-freq", type=float, default=0.0,
+                   help="Minimum frequency for focal amp frequency plot "
+                        "(default 0.0 = show all).")
+    p.add_argument("--log2-delta",          type=float, default=0.2,
+                   help="Min log2 elevation above local background (default 0.2).")
+    p.add_argument("--focal-amp-diagnostics", action="store_true",
+                   help="Generate per-sample diagnostic plots.")
+
+
 # ---------------------------------------------------------------------------
-# ichorcna sub-command
+# ichorcna — full pipeline (unchanged)
 # ---------------------------------------------------------------------------
 
 def _build_ichorcna_parser(sub: argparse._SubParsersAction) -> None:
     p = sub.add_parser(
         "ichorcna",
-        help="Analyze ichorCNA output directories.",
+        help="Full ichorCNA analysis pipeline (broad CNA + focal amps + "
+             "longitudinal + signatures).",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    # Config file
-    p.add_argument("--config", default=None, metavar="FILE",
-                   help="YAML config file. CLI arguments override config values.")
-    p.add_argument("--write-config", default=None, metavar="FILE",
-                   help="Write a default config YAML to FILE and exit.")
-    # Input
+    _add_common_ichorcna_args(p)
     p.add_argument("--dir-1mb",  default=None,
                    help="Directory containing ichorCNA 1 Mbp run output.")
     p.add_argument("--dir-50kb", default=None,
                    help="Directory containing ichorCNA 50 kbp run output.")
-    # Output
     p.add_argument("--output", default="ichorcna_results",
                    help="Output directory.")
-    # Tumor fraction
-    p.add_argument("--tf-threshold", type=float, default=0.03,
-                   help="Minimum tumor fraction (default 3%%).")
-    p.add_argument("--exclude-entities", nargs="+", default=[],
-                   metavar="ENTITY",
-                   help="Entity names to exclude from all analysis "
-                        "(e.g. --exclude-entities Lung Ovarian). "
-                        "Entity names are case-sensitive and must match "
-                        "those derived by entity_from_sample "
-                        "(Breast, Colorectal, Prostate, Lung, Ovarian, Other).")
-    p.add_argument("--min-reads", type=int, default=1_000_000,
-                   help="Minimum total reads from WIG file to include a "
-                        "sample (default 1,000,000). Samples below this "
-                        "threshold are excluded before TF filtering. "
-                        "Set to 0 to disable.")
-    # Broad CNA
-    p.add_argument("--amp-min-cn", type=int, default=4,
-                   help="Minimum copy number to call focal amplification "
-                        "(default 4; GAIN/CN=3 is excluded).")
-    # Focal amp
-    p.add_argument("--focal-min-bp", type=int, default=50_000,
-                   help="Minimum focal amp segment size in bp.")
-    p.add_argument("--focal-max-bp", type=int, default=500_000,
-                   help="Maximum focal amp segment size in bp.")
-    p.add_argument("--focal-min-bins", type=int, default=3,
-                   help="Minimum 50 kbp bins in a segment (default 3 = 150 kbp).")
-    p.add_argument("--focal-flank-bins", type=int, default=2,
-                   help="Number of 1 Mbp bins per side for local background "
-                        "(default 2 = 2 Mbp window on each side).")
-    p.add_argument("--max-focal-per-sample", type=int, default=5,
-                   help="Discard samples with more focal amps than this (default 5).")
-    p.add_argument("--focal-noise-factor", type=float, default=2.0,
-                   help="Focal amp segment logR must be >= this multiple of "
-                        "the sample neighbour noise (default 2.0).")
-    p.add_argument("--focal-freq-min-freq", type=float, default=0.0,
-                   help="Minimum frequency to show in the focal amp "
-                        "frequency plot (default 0.0 = show all). "
-                        "Set e.g. to 0.01 to restrict to events in "
-                        "at least 1%% of patients.")
-    p.add_argument("--focal-amp-diagnostics", action="store_true",
-                   help="Generate per-sample diagnostic plots for all samples "
-                        "with focal amp candidates (including discarded samples). "
-                        "Plots written to <output>/focal_amp_diagnostics/.")
-    p.add_argument("--log2-delta", type=float, default=0.2,
-                   help="Min log2 elevation above local background.")
+    _add_focal_amp_args(p)
     p.add_argument("--skip-validation", action="store_true",
-                   help="Skip segment file validation (step 4/7).")
-    # Plotting
+                   help="Skip segment file validation.")
     p.add_argument("--plot-bin-size", type=int, default=5_000_000,
-                   help="Bin size in bp for the broad CNA frequency plot "
-                        "(default 5 Mbp). Smaller = higher resolution.")
+                   help="Bin size in bp for the broad CNA frequency plot.")
     p.add_argument("--longitudinal-plots", action="store_true",
-                   help="Generate one genome-wide pairwise CN comparison plot "
-                        "per consecutive timepoint pair per patient. "
-                        "Can produce many files for large cohorts.")
+                   help="Generate longitudinal pairwise CN comparison plots.")
     p.add_argument("--longitudinal-plot-dir", default=None, metavar="DIR",
-                   help="Output directory for longitudinal pairwise plots "
-                        "(default: <output>/longitudinal_plots/).")
+                   help="Output directory for longitudinal plots.")
     p.add_argument("--max-noise", type=float, default=0.15,
-                   help="Maximum per-sample neighbour noise (median absolute "
-                        "consecutive bin difference) allowed for longitudinal "
-                        "plots. Pairs where either sample exceeds this "
-                        "threshold are skipped (default 0.15). Set to 0 to "
-                        "disable filtering.")
+                   help="Max neighbour noise for longitudinal plots.")
     p.add_argument("--min-signal", type=float, default=None,
-                   help="Minimum SNR (p95/noise) for longitudinal plots. "
-                        "Pairs below this threshold are skipped "
-                        "(default: no filter). Suggested: 1.5.")
+                   help="Min SNR for longitudinal plots.")
     p.add_argument("--min-altered-fraction", type=float, default=0.05,
-                   help="Minimum fraction of 50 kbp bins (after 10-bin "
-                        "smoothing) with |log2R| > 0.2 required for both "
-                        "samples in a longitudinal pair (default 0.05 = 5%%). "
-                        "Pairs where either sample falls below this are "
-                        "considered flat and skipped.")
+                   help="Min fraction of altered bins for longitudinal plots.")
     p.add_argument("--plot-raw", action="store_true",
-                   help="Also output an unsmoothed longitudinal plot in "
-                        "addition to the 5-bin and 10-bin smoothed versions "
-                        "(default: off).")
+                   help="Also output unsmoothed longitudinal plots.")
     p.add_argument("--emergent-min-bins", type=int, default=3,
-                   help="Minimum consecutive bins with |delta| > threshold "
-                        "to call an emergent CNA region (default 3).")
+                   help="Min consecutive bins to call emergent CNA (default 3).")
     p.add_argument("--emergent-min-delta", type=float, default=0.5,
-                   help="Minimum |delta log2R| per bin to count toward "
-                        "an emergent CNA region (default 0.5).")
+                   help="Min |delta log2R| for emergent CNA (default 0.5).")
     p.add_argument("--no-clean-plots", action="store_true",
-                   help="Disable generation of 'clean' publication-style "
-                        "longitudinal plots (overlaid + differential panels "
-                        "only, fixed gain/loss colour scheme, no focal-amp "
-                        "shading), written to <plot_dir>/clean/. "
-                        "Default: clean plots are generated.")
-    # Sigminer CN signatures
+                   help="Disable clean publication-style longitudinal plots.")
     p.add_argument("--sigminer", action="store_true",
                    help="Run sigminer CN signature analysis.")
-    p.add_argument("--sigminer-ref", nargs="+",
-                   default=["CNS_USARC"],
-                   metavar="REF",
-                   help="Reference signature set(s) to fit against. "
-                        "Built-in option compatible with ichorCNA (no LOH required): "
-                        "CNS_USARC (40 cat). "
-                        "CNS_TCGA/CNS_TCGA176/CNS_PCAWG176 require minor_cn "
-                        "which ichorCNA does not provide. Default: CNS_USARC.")
+    p.add_argument("--sigminer-ref", nargs="+", default=["CNS_TCGA"], metavar="REF",
+                   help="Reference signature sets (default: CNS_TCGA).")
     p.add_argument("--sigminer-min-tf", type=float, default=0.15,
-                   help="Minimum TF for sigminer samples (default 0.15 = 15%%).")
+                   help="Min TF for sigminer (default 15%%).")
     p.add_argument("--sigminer-genome", default="hg38",
                    choices=["hg38", "hg19"],
-                   help="Reference genome for sigminer (default hg38).")
+                   help="Reference genome for sigminer.")
     p.add_argument("--sigminer-cores", type=int, default=1,
-                   help="Parallel cores for sigminer (default 1).")
+                   help="Parallel cores for sigminer.")
     p.add_argument("--sigminer-n-sig", type=int, default=6,
-                   help="Number of de novo CN signatures to extract (default 6). "
-                        "Typical range: 4-10.")
+                   help="Number of de novo CN signatures to extract.")
     p.add_argument("--sigminer-no-run", action="store_true",
-                   help="Prepare sigminer inputs and R script but do not "
-                        "execute Rscript.")
-
-    # LiquidCNA integration
+                   help="Prepare R script only, do not execute.")
     p.add_argument("--liquidcna", action="store_true",
-                   help="Run liquidCNA subclonal evolution analysis on samples "
-                        "with >= 2 timepoints above --liquidcna-min-tf.")
+                   help="Run liquidCNA subclonal evolution analysis.")
     p.add_argument("--liquidcna-functions", default=None, metavar="FILE",
-                   help="Path to mixture_estimation_functions.R from "
-                        "github.com/elakatos/liquidCNA (required for --liquidcna).")
+                   help="Path to mixture_estimation_functions.R.")
     p.add_argument("--liquidcna-min-tf", type=float, default=0.20,
-                   help="Minimum tumor fraction for liquidCNA samples "
-                        "(default 0.20 = 20%%).")
+                   help="Min TF for liquidCNA (default 20%%).")
     p.add_argument("--liquidcna-min-timepoints", type=int, default=2,
-                   help="Minimum qualifying timepoints per patient for "
-                        "liquidCNA (default 2).")
+                   help="Min qualifying timepoints for liquidCNA (default 2).")
     p.add_argument("--liquidcna-no-run", action="store_true",
-                   help="Prepare liquidCNA inputs and R script but do not "
-                        "execute Rscript (useful for inspection or cluster jobs).")
-    p.add_argument("--rscript", default="Rscript", metavar="BIN",
-                   help="Path to Rscript binary (default: Rscript).")
-
-    # Annotation
-    _add_cosmic_arg(p)
+                   help="Prepare inputs only, do not execute Rscript.")
     p.set_defaults(func=_run_ichorcna)
 
 
-def _run_ichorcna(args: argparse.Namespace) -> None:
+# ---------------------------------------------------------------------------
+# focal-amps — detect and plot focal amplifications across a cohort
+# ---------------------------------------------------------------------------
+
+def _build_focal_amps_parser(sub: argparse._SubParsersAction) -> None:
+    p = sub.add_parser(
+        "focal-amps",
+        help="Detect focal amplifications and compute cohort-level frequencies "
+             "from ichorCNA output. Runs broad CNA + focal amp detection only "
+             "(no longitudinal, no signatures).",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+        epilog="""
+Examples:
+  cfdna-cnv focal-amps --dir-1mb /runs/1mb --dir-50kb /runs/50kb \\
+      --cosmic-cgc Census.tsv --output focal_results
+
+  # With a config file:
+  cfdna-cnv focal-amps --config analysis.yaml
+""",
+    )
+    _add_common_ichorcna_args(p)
+    p.add_argument("--dir-1mb",  default=None,
+                   help="Directory containing ichorCNA 1 Mbp run output.")
+    p.add_argument("--dir-50kb", default=None,
+                   help="Directory containing ichorCNA 50 kbp run output.")
+    p.add_argument("--output", default="focal_amp_results",
+                   help="Output directory (default: focal_amp_results).")
+    _add_focal_amp_args(p)
+    p.add_argument("--skip-validation", action="store_true",
+                   help="Skip segment file validation.")
+    p.add_argument("--plot-bin-size", type=int, default=5_000_000,
+                   help="Bin size in bp for the broad CNA frequency plot.")
+    p.set_defaults(func=_run_focal_amps)
+
+
+def _run_focal_amps(args: argparse.Namespace) -> None:
+    """Delegate to ichorcna_cmd.run with longitudinal and signature flags off."""
+    args.longitudinal_plots    = False
+    args.longitudinal_plot_dir = None
+    args.max_noise             = 0.15
+    args.min_signal            = None
+    args.min_altered_fraction  = 0.05
+    args.plot_raw              = False
+    args.emergent_min_bins     = 3
+    args.emergent_min_delta    = 0.5
+    args.no_clean_plots        = True
+    args.sigminer              = False
+    args.liquidcna             = False
     from .commands.ichorcna_cmd import run
     run(args)
 
 
 # ---------------------------------------------------------------------------
-# cbio sub-command
+# compare — pairwise longitudinal CN comparison
+# ---------------------------------------------------------------------------
+
+def _build_compare_parser(sub: argparse._SubParsersAction) -> None:
+    p = sub.add_parser(
+        "compare",
+        help="Pairwise longitudinal CN comparison between two ichorCNA "
+             "timepoints. Generates overlaid CN profiles, differential plots, "
+             "and emergent CNA detection.",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+        epilog="""
+Examples:
+  # Two specific samples in the same 50kb run directory:
+  cfdna-cnv compare --dir-50kb /runs/50kb \\
+      --sample-a P12_TP1 --sample-b P12_TP2 --output compare_P12
+
+  # All consecutive longitudinal pairs in the cohort:
+  cfdna-cnv compare --dir-1mb /runs/1mb --dir-50kb /runs/50kb \\
+      --all-pairs --output longitudinal_results
+""",
+    )
+    _add_common_ichorcna_args(p)
+    p.add_argument("--dir-1mb",  default=None,
+                   help="Directory containing ichorCNA 1 Mbp run output.")
+    p.add_argument("--dir-50kb", default=None,
+                   help="Directory containing ichorCNA 50 kbp run output.")
+    p.add_argument("--output", default="compare_results",
+                   help="Output directory (default: compare_results).")
+    p.add_argument("--max-noise", type=float, default=0.15,
+                   help="Max neighbour noise; noisier pairs are skipped.")
+    p.add_argument("--min-signal", type=float, default=None,
+                   help="Min SNR (p95/noise); null = no filter.")
+    p.add_argument("--min-altered-fraction", type=float, default=0.05,
+                   help="Min fraction of altered bins for a pair to be plotted.")
+    p.add_argument("--plot-raw", action="store_true",
+                   help="Also output unsmoothed plots.")
+    p.add_argument("--emergent-min-bins", type=int, default=3,
+                   help="Min consecutive bins to call emergent CNA.")
+    p.add_argument("--emergent-min-delta", type=float, default=0.5,
+                   help="Min |delta log2R| for emergent CNA.")
+    p.add_argument("--no-clean-plots", action="store_true",
+                   help="Disable clean publication-style longitudinal plots.")
+    _add_focal_amp_args(p)
+    p.add_argument("--skip-validation", action="store_true",
+                   help="Skip segment file validation.")
+    p.add_argument("--plot-bin-size", type=int, default=5_000_000,
+                   help="Bin size for broad CNA frequency plot.")
+    p.set_defaults(func=_run_compare)
+
+
+def _run_compare(args: argparse.Namespace) -> None:
+    """Delegate to ichorcna_cmd.run with longitudinal plots enabled."""
+    args.longitudinal_plots    = True
+    args.longitudinal_plot_dir = getattr(args, "longitudinal_plot_dir", None)
+    args.sigminer              = False
+    args.liquidcna             = False
+    from .commands.ichorcna_cmd import run
+    run(args)
+
+
+# ---------------------------------------------------------------------------
+# trajectories — focal amp CN trajectories across patient timepoints
+# ---------------------------------------------------------------------------
+
+def _build_trajectories_parser(sub: argparse._SubParsersAction) -> None:
+    p = sub.add_parser(
+        "trajectories",
+        help="Track copy-number trajectories of focal amplifications across "
+             "multiple timepoints per patient. Produces per-patient line plots "
+             "(log2 and CN space), genome maps, and overlay profiles.",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+        epilog="""
+Examples:
+  cfdna-cnv trajectories --dir-1mb /runs/1mb --dir-50kb /runs/50kb \\
+      --cosmic-cgc Census.tsv --output trajectory_results
+
+  # Relax TF filter:
+  cfdna-cnv trajectories --dir-1mb /runs/1mb --dir-50kb /runs/50kb \\
+      --traj-min-tf 0.07 --traj-min-reads 500000
+""",
+    )
+    _add_common_ichorcna_args(p)
+    p.add_argument("--dir-1mb",  default=None,
+                   help="Directory containing ichorCNA 1 Mbp run output.")
+    p.add_argument("--dir-50kb", default=None,
+                   help="Directory containing ichorCNA 50 kbp run output.")
+    p.add_argument("--output", default="trajectory_results",
+                   help="Output directory (default: trajectory_results).")
+    _add_focal_amp_args(p)
+    p.add_argument("--traj-min-tf", type=float, default=0.10,
+                   help="Min TF for trajectory timepoints (default 10%%). "
+                        "Note: separate from --tf-threshold which controls "
+                        "focal amp detection.")
+    p.add_argument("--traj-min-reads", type=int, default=1_000_000,
+                   help="Min reads for trajectory timepoints (default 1,000,000).")
+    p.add_argument("--traj-max-scale", type=float, default=3.0,
+                   help="Max empirical scale factor; larger values excluded "
+                        "(default 3.0).")
+    p.add_argument("--traj-min-timepoints", type=int, default=2,
+                   help="Min qualifying timepoints per patient (default 2).")
+    p.add_argument("--skip-validation", action="store_true",
+                   help="Skip segment file validation.")
+    p.add_argument("--plot-bin-size", type=int, default=5_000_000,
+                   help="Bin size for broad CNA frequency plot.")
+    p.set_defaults(func=_run_trajectories)
+
+
+def _run_trajectories(args: argparse.Namespace) -> None:
+    """Delegate to ichorcna_cmd.run with longitudinal + trajectory flags set."""
+    # Map trajectory-specific args to the internal names expected by ichorcna_cmd
+    args.longitudinal_plots    = True
+    args.longitudinal_plot_dir = None
+    args.max_noise             = 0.15
+    args.min_signal            = None
+    args.min_altered_fraction  = 0.05
+    args.plot_raw              = False
+    args.emergent_min_bins     = 3
+    args.emergent_min_delta    = 0.5
+    args.no_clean_plots        = False
+    args.sigminer              = False
+    args.liquidcna             = False
+    # traj-specific args get picked up directly by plot_all_focal_amp_trajectories
+    # via the ichorcna_cmd run function
+    from .commands.ichorcna_cmd import run
+    run(args)
+
+
+# ---------------------------------------------------------------------------
+# signatures — CN signature extraction via sigminer
+# ---------------------------------------------------------------------------
+
+def _build_signatures_parser(sub: argparse._SubParsersAction) -> None:
+    p = sub.add_parser(
+        "signatures",
+        help="Extract copy-number signatures from ichorCNA output using "
+             "sigminer (R). Performs de novo NMF extraction and maps to "
+             "COSMIC CN reference signatures.",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+        epilog="""
+Requires R packages: r-sigminer r-ggplot2 r-ggplotify r-dplyr (add to pixi.toml)
+
+Examples:
+  cfdna-cnv signatures --dir-1mb /runs/1mb --dir-50kb /runs/50kb \\
+      --output signature_results
+
+  # Extract 8 signatures and compare to multiple references:
+  cfdna-cnv signatures --dir-1mb /runs/1mb --dir-50kb /runs/50kb \\
+      --sig-n-sig 8 --sig-ref CNS_TCGA CNS_PCAWG176
+""",
+    )
+    _add_common_ichorcna_args(p)
+    p.add_argument("--dir-1mb",  default=None,
+                   help="Directory containing ichorCNA 1 Mbp run output.")
+    p.add_argument("--dir-50kb", default=None,
+                   help="Directory containing ichorCNA 50 kbp run output.")
+    p.add_argument("--output", default="signature_results",
+                   help="Output directory (default: signature_results).")
+    p.add_argument("--sig-min-tf", type=float, default=0.15,
+                   help="Min TF to include a sample (default 15%%).")
+    p.add_argument("--sig-ref", nargs="+", default=["CNS_TCGA"], metavar="REF",
+                   help="Reference signature sets. Options: CNS_TCGA, "
+                        "CNS_USARC, CNS_TCGA176, CNS_PCAWG176 "
+                        "(default: CNS_TCGA).")
+    p.add_argument("--sig-n-sig", type=int, default=6,
+                   help="Number of de novo signatures to extract (default 6).")
+    p.add_argument("--sig-genome", default="hg38",
+                   choices=["hg38", "hg19"],
+                   help="Reference genome (default hg38).")
+    p.add_argument("--sig-cores", type=int, default=1,
+                   help="Parallel cores for NMF (default 1).")
+    p.add_argument("--sig-no-run", action="store_true",
+                   help="Write R script only, do not execute Rscript.")
+    _add_focal_amp_args(p)
+    p.add_argument("--skip-validation", action="store_true",
+                   help="Skip segment file validation.")
+    p.add_argument("--plot-bin-size", type=int, default=5_000_000,
+                   help="Bin size for broad CNA frequency plot.")
+    p.set_defaults(func=_run_signatures)
+
+
+def _run_signatures(args: argparse.Namespace) -> None:
+    """Delegate to ichorcna_cmd.run with sigminer enabled."""
+    # Map sig-* args → internal sigminer_* names
+    args.sigminer         = True
+    args.sigminer_ref     = args.sig_ref
+    args.sigminer_min_tf  = args.sig_min_tf
+    args.sigminer_genome  = args.sig_genome
+    args.sigminer_cores   = args.sig_cores
+    args.sigminer_n_sig   = args.sig_n_sig
+    args.sigminer_no_run  = args.sig_no_run
+    args.longitudinal_plots   = False
+    args.longitudinal_plot_dir = None
+    args.max_noise            = 0.15
+    args.min_signal           = None
+    args.min_altered_fraction = 0.05
+    args.plot_raw             = False
+    args.emergent_min_bins    = 3
+    args.emergent_min_delta   = 0.5
+    args.no_clean_plots       = True
+    args.liquidcna            = False
+    from .commands.ichorcna_cmd import run
+    run(args)
+
+
+# ---------------------------------------------------------------------------
+# cbio — cBioPortal analysis (unchanged)
 # ---------------------------------------------------------------------------
 
 def _build_cbio_parser(sub: argparse._SubParsersAction) -> None:
     p = sub.add_parser(
         "cbio",
-        help="Analyze cBioPortal segmentation files.",
+        help="Analyze cBioPortal segmentation files (broad CNA + focal amps).",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    # Input — built-in entities (semicolon-separated for multiple files)
-    # Config file
     p.add_argument("--config", default=None, metavar="FILE",
                    help="YAML config file. CLI arguments override config values.")
     p.add_argument("--write-config", default=None, metavar="FILE",
@@ -210,52 +420,30 @@ def _build_cbio_parser(sub: argparse._SubParsersAction) -> None:
     p.add_argument("--colorectal", default=None,
                    help="Colorectal cancer .seg file(s), semicolon-separated.")
     p.add_argument("--seg", nargs="+", metavar="NAME=FILE", default=[],
-                   help="Additional entities as NAME=FILE (semicolons for "
-                        "multiple files per entity).")
-    # Output
+                   help="Additional entities as NAME=FILE.")
     p.add_argument("--output", default="cbio_cna_results",
                    help="Output directory.")
-    # Broad CNA
-    p.add_argument("--bin-size",        type=int,   default=5_000_000,
-                   help="Genomic bin size in bp.")
-    p.add_argument("--gain-threshold",  type=float, default=0.2,
-                   help="seg.mean threshold for GAIN call.")
-    p.add_argument("--loss-threshold",  type=float, default=-0.2,
-                   help="seg.mean threshold for LOSS call.")
-    p.add_argument("--min-seg-size",    type=int,   default=0,
-                   help="Minimum segment size in bp (0 = no filter).")
-    # Focal amp
-    p.add_argument("--focal-min-bp",    type=int,   default=50_000,
-                   help="Minimum focal amp segment size in bp.")
-    p.add_argument("--focal-max-bp",    type=int,   default=500_000,
-                   help="Maximum focal amp segment size in bp.")
-    p.add_argument("--focal-log2-min",  type=float, default=0.5,
-                   help="Minimum absolute seg.mean for focal amp.")
-    p.add_argument("--focal-log2-delta",type=float, default=0.2,
-                   help="Min elevation above local background.")
-    p.add_argument("--focal-flank-bp",  type=int,   default=10_000_000,
-                   help="Flanking window (bp) for local background.")
-    p.add_argument("--focal-min-freq",  type=float, default=0.01,
-                   help="Minimum frequency to include in focal amp plot.")
-    # LiftOver (hg19 → hg38)
-    p.add_argument("--liftover", action="store_true",
-                   help="Lift coordinates from hg19 to hg38 before analysis.")
-    p.add_argument("--chain-file", default=None, metavar="FILE",
-                   help="Path to hg19ToHg38.over.chain.gz. Required when "
-                        "--liftover is set. Download from: "
-                        "https://hgdownload.gi.ucsc.edu/goldenPath/hg19/"
-                        "liftOver/hg19ToHg38.over.chain.gz")
-    p.add_argument("--liftover-bin", default="liftOver", metavar="PATH",
-                   help="Path to the UCSC liftOver binary (default: liftOver "
-                        "on PATH). Download from: https://hgdownload.soe.ucsc"
-                        ".edu/admin/exe/linux.x86_64/liftOver")
-    p.add_argument("--liftover-min-match", type=float, default=0.95,
-                   metavar="FRAC",
-                   help="Minimum fraction of bases that must remap (default "
-                        "0.95). Lower to 0.1 to keep more segments.")
-    # Annotation
+    p.add_argument("--bin-size",          type=int,   default=5_000_000)
+    p.add_argument("--gain-threshold",    type=float, default=0.2)
+    p.add_argument("--loss-threshold",    type=float, default=-0.2)
+    p.add_argument("--min-seg-size",      type=int,   default=0)
+    p.add_argument("--focal-min-bp",      type=int,   default=50_000)
+    p.add_argument("--focal-max-bp",      type=int,   default=500_000)
+    p.add_argument("--focal-log2-min",    type=float, default=0.5)
+    p.add_argument("--focal-log2-delta",  type=float, default=0.2)
+    p.add_argument("--focal-flank-bp",    type=int,   default=10_000_000)
+    p.add_argument("--focal-min-freq",    type=float, default=0.01)
+    p.add_argument("--liftover",          action="store_true")
+    p.add_argument("--chain-file",        default=None, metavar="FILE")
+    p.add_argument("--liftover-bin",      default="liftOver", metavar="PATH")
+    p.add_argument("--liftover-min-match",type=float, default=0.95, metavar="FRAC")
     _add_cosmic_arg(p)
     p.set_defaults(func=_run_cbio)
+
+
+def _run_ichorcna(args: argparse.Namespace) -> None:
+    from .commands.ichorcna_cmd import run
+    run(args)
 
 
 def _run_cbio(args: argparse.Namespace) -> None:
@@ -277,32 +465,42 @@ def main() -> None:
     sub.required = True
     _build_ichorcna_parser(sub)
     _build_cbio_parser(sub)
+    _build_focal_amps_parser(sub)
+    _build_compare_parser(sub)
+    _build_trajectories_parser(sub)
+    _build_signatures_parser(sub)
 
     args = parser.parse_args()
 
-    # ── --write-config: dump default and exit ────────────────────────────────
+    # ── --write-config: dump default and exit ────────────────────────────
     if getattr(args, "write_config", None):
         from .config import write_default_config
-        write_default_config(Path(args.write_config), args.command)
+        cmd = args.command if args.command in ("ichorcna", "cbio") else "ichorcna"
+        write_default_config(Path(args.write_config), cmd)
         sys.exit(0)
 
-    # ── --config: load YAML and apply values not set on the CLI ─────────────
+    # ── --config: load YAML and apply values not set on the CLI ─────────
     if getattr(args, "config", None):
         from .config import load_config, apply_config_to_namespace
-        cfg      = load_config(Path(args.config))
+        cfg        = load_config(Path(args.config))
         sub_parser = sub._name_parser_map[args.command]
-        args     = apply_config_to_namespace(args, cfg, sub_parser)
+        args       = apply_config_to_namespace(args, cfg, sub_parser)
 
-    # ── Validate required args after config merge ────────────────────────────
-    if args.command == "ichorcna":
-        missing = [f"--{f.replace('_', '-')}"
-                   for f in ("dir_1mb", "dir_50kb")
-                   if not getattr(args, f, None)]
-        if missing:
-            parser.error(
-                f"The following arguments are required (or set in --config): "
-                f"{', '.join(missing)}"
-            )
+    # ── Validate required inputs after config merge ──────────────────────
+    _NEEDS_1MB  = {"ichorcna", "focal-amps", "compare",
+                   "trajectories", "signatures"}
+    _NEEDS_50KB = {"ichorcna", "focal-amps", "compare",
+                   "trajectories", "signatures"}
+    missing = []
+    if args.command in _NEEDS_1MB  and not getattr(args, "dir_1mb",  None):
+        missing.append("--dir-1mb")
+    if args.command in _NEEDS_50KB and not getattr(args, "dir_50kb", None):
+        missing.append("--dir-50kb")
+    if missing:
+        parser.error(
+            f"The following arguments are required (or set in --config): "
+            f"{', '.join(missing)}"
+        )
 
     args.func(args)
 
