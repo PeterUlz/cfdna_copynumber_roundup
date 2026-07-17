@@ -106,6 +106,27 @@ def run(args: argparse.Namespace) -> None:
     freq_by_entity:  dict[str, pd.DataFrame] = {}
     all_freq_frames: list[pd.DataFrame]      = []
 
+    # Filter out patients with no informative signal: if a patient has no
+    # segment with |seg_mean| > 0.2 their CN profile is essentially flat
+    # (likely low purity or failed QC) and inflates the denominator.
+    min_abs_seg = 0.2
+    for entity in list(seg_by_entity.keys()):
+        seg_df  = seg_by_entity[entity]
+        n_before = seg_df["patient"].nunique()
+        # Keep patients that have at least one segment above the threshold
+        informative = (
+            seg_df.groupby("patient")["seg_mean"]
+            .apply(lambda s: (s.abs() > min_abs_seg).any())
+        )
+        keep_patients = informative[informative].index
+        seg_by_entity[entity] = seg_df[seg_df["patient"].isin(keep_patients)]
+        n_after = seg_by_entity[entity]["patient"].nunique()
+        n_removed = n_before - n_after
+        if n_removed > 0:
+            print(f"      [{entity}] Removed {n_removed} flat patient(s) "
+                  f"(no segment with |seg_mean| > {min_abs_seg}); "
+                  f"{n_after} remaining.")
+
     for entity, seg_df in seg_by_entity.items():
         print(f"      Processing {entity} …")
         freq = compute_frequencies(

@@ -103,19 +103,18 @@ def plot_cna_frequencies(
                 ax.bar(x0, -row["freq_loss"], width=width, align="edge",
                        color=pal["loss"], alpha=0.85, linewidth=0, zorder=2)
 
-        ax.set_ylim(-1.05, 1.05)
-        ax.set_yticks([-1, -0.75, -0.5, -0.25, 0, 0.25, 0.5, 0.75, 1])
-        ax.set_yticklabels(["100","75","50","25","0","25","50","75","100"],
-                           fontsize=7, color="#444444")
+        ax.set_ylim(-0.60, 0.60)
+        ax.yaxis.set_major_formatter(mticker.PercentFormatter(xmax=1, decimals=0))
         ax.set_ylabel("% patients", fontsize=8, color="#444444", labelpad=6)
 
         n_pts = int(freq["n_total"].iloc[0])
-        ax.set_title(f"{pal['label']}   (n = {n_pts})",
-                     fontsize=11, fontweight="bold",
-                     color="#222222", pad=6, loc="left")
-        ax.text(GENOME_SIZE * 1.002, 0.55, "Gain",
+        ax.set_title(
+            f"{pal['label']}   (n = {n_pts} patients)",
+            fontsize=11, fontweight="bold",
+            color="#222222", pad=6, loc="left")
+        ax.text(GENOME_SIZE * 1.002,  0.35, "Gain",
                 fontsize=8, color=pal["gain"], va="center", ha="left")
-        ax.text(GENOME_SIZE * 1.002, -0.55, "Loss",
+        ax.text(GENOME_SIZE * 1.002, -0.35, "Loss",
                 fontsize=8, color=pal["loss"], va="center", ha="left")
 
     fig.suptitle("Genome-Wide Copy-Number Frequencies",

@@ -200,16 +200,17 @@ def plot_broad_cna_frequencies(
             loci["freq_del"].max() if not loci.empty else 0,
             0.1,
         )
-        ax.set_ylim(-min(y_max * 1.15, 1.05), min(y_max * 1.15, 1.05))
+        y_cap = 0.60   # cap at 60% so shallow events don't compress the scale
+        ax.set_ylim(-y_cap, y_cap)
         ax.yaxis.set_major_formatter(mticker.PercentFormatter(xmax=1, decimals=0))
         ax.set_ylabel("% patients", fontsize=8, color="#444444", labelpad=5)
         ax.set_title(
-            f"{entity}   (n = {n_entity} samples, {n_patients} patients)",
+            f"{entity}   (n = {n_patients} patients, one sample per patient)",
             fontsize=11, fontweight="bold", color="#222222", pad=6, loc="left",
         )
-        ax.text(GENOME_SIZE * 1.002,  y_max * 0.5, "Gain",
+        ax.text(GENOME_SIZE * 1.002,  y_cap * 0.5, "Gain",
                 fontsize=8, color=pal["gain"], va="center", ha="left", fontweight="bold")
-        ax.text(GENOME_SIZE * 1.002, -y_max * 0.5, "Loss",
+        ax.text(GENOME_SIZE * 1.002, -y_cap * 0.5, "Loss",
                 fontsize=8, color=pal["loss"], va="center", ha="left", fontweight="bold")
 
     fig.suptitle("Genome-Wide Copy-Number Frequencies — ichorCNA",

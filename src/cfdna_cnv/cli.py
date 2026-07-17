@@ -259,6 +259,268 @@ def _run_compare(args: argparse.Namespace) -> None:
 # trajectories — focal amp CN trajectories across patient timepoints
 # ---------------------------------------------------------------------------
 
+def _build_compare_samples_parser(sub: argparse._SubParsersAction) -> None:
+    p = sub.add_parser(
+        "compare-samples",
+        help="Direct pairwise CN comparison between two explicitly named "
+             "ichorCNA samples. No TF filtering or cohort logic — just load "
+             "the two samples and plot.",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+        epilog="""
+Examples:
+  # Minimal: compare two samples, auto-detect TF from params files
+  cfdna-cnv compare-samples \\
+      --dir-50kb /runs/50kb \\
+      --sample-a P12_TP1 --sample-b P12_TP2 \\
+      --output P12_comparison
+
+  # With explicit TFs and optional 1Mb focal amp annotation:
+  cfdna-cnv compare-samples \\
+      --dir-50kb /runs/50kb --dir-1mb /runs/1mb \\
+      --sample-a P12_TP1 --tf-a 0.42 \\
+      --sample-b P12_TP2 --tf-b 0.21 \\
+      --patient P12 --label "Pre vs Post treatment" \\
+      --focal-tsv /results/focal_amplifications.tsv \\
+      --output P12_comparison
+
+  # Compare multiple pairs in one call:
+  cfdna-cnv compare-samples \\
+      --dir-50kb /runs/50kb \\
+      --pairs "P12_TP1:P12_TP2" "B34_TP1:B34_TP3" \\
+      --output batch_comparisons
+""",
+    )
+    p.add_argument("--dir-50kb", required=True,
+                   help="Directory containing ichorCNA 50 kbp run output.")
+    p.add_argument("--dir-1mb", default=None,
+                   help="Directory containing ichorCNA 1 Mbp run output "
+                        "(optional; used for TF lookup if --tf-a/b not given).")
+    p.add_argument("--output", default="compare_samples_results",
+                   help="Output directory (default: compare_samples_results).")
+
+    # ── Single-pair mode ────────────────────────────────────────────────
+    pair = p.add_argument_group("single pair")
+    pair.add_argument("--sample-a", default=None, metavar="NAME",
+                      help="Name of the earlier sample (as it appears in the "
+                           "ichorCNA output file names).")
+    pair.add_argument("--sample-b", default=None, metavar="NAME",
+                      help="Name of the later sample.")
+    pair.add_argument("--tf-a", type=float, default=None,
+                      help="Tumor fraction of sample A (0–1). If omitted, "
+                           "read from the .params.txt file.")
+    pair.add_argument("--tf-b", type=float, default=None,
+                      help="Tumor fraction of sample B (0–1). If omitted, "
+                           "read from the .params.txt file.")
+    pair.add_argument("--patient", default=None,
+                      help="Patient ID for plot title and focal amp lookup. "
+                           "Inferred from sample name if omitted.")
+    pair.add_argument("--label", default=None,
+                      help="Free-text subtitle for the plot "
+                           "(e.g. 'Pre vs Post treatment').")
+    pair.add_argument("--timepoint-a", type=int, default=None,
+                      help="Timepoint index for sample A (e.g. 1).")
+    pair.add_argument("--timepoint-b", type=int, default=None,
+                      help="Timepoint index for sample B (e.g. 2).")
+
+    # ── Batch mode ──────────────────────────────────────────────────────
+    batch = p.add_argument_group("batch mode (alternative to single pair)")
+    batch.add_argument("--pairs", nargs="+", default=[], metavar="A:B",
+                       help="One or more sample pairs as 'SAMPLE_A:SAMPLE_B'. "
+                            "TFs are auto-detected from params files.")
+
+    # ── Shared options ──────────────────────────────────────────────────
+    p.add_argument("--focal-tsv", default=None, metavar="FILE",
+                   help="Path to focal_amplifications.tsv for focal amp "
+                        "shading (optional).")
+    p.add_argument("--max-noise", type=float, default=0.15,
+                   help="Max neighbour noise; pairs above this are skipped.")
+    p.add_argument("--min-signal", type=float, default=None,
+                   help="Min SNR; pairs below this are skipped (default: off).")
+    p.add_argument("--min-altered-fraction", type=float, default=0.05,
+                   help="Min fraction of altered bins.")
+    p.add_argument("--emergent-min-bins", type=int, default=3,
+                   help="Min consecutive bins to call emergent CNA.")
+    p.add_argument("--emergent-min-delta", type=float, default=0.5,
+                   help="Min |delta log2R| for emergent CNA.")
+    p.add_argument("--no-clean-plots", action="store_true",
+                   help="Skip clean publication-style plots.")
+    p.add_argument("--plot-raw", action="store_true",
+                   help="Also output unsmoothed plots.")
+    p.add_argument("--cosmic-cgc", default=None, metavar="FILE",
+                   help="COSMIC Cancer Gene Census file for annotation.")
+    p.set_defaults(func=_run_compare_samples)
+
+
+def _run_compare_samples(args: argparse.Namespace) -> None:
+    """
+    Directly invoke plot_longitudinal_combined for one or more explicit
+    sample pairs, without running the full ichorCNA pipeline.
+    """
+    import re
+    from pathlib import Path as _Path
+
+    from .common.io import find_sample_files, normalize_sample_name
+    from .common.cosmic import load_cosmic_cgc, annotate_with_cgc
+    from .ichorcna.longitudinal_plots import plot_longitudinal_combined
+
+    outdir = _Path(args.output)
+    outdir.mkdir(parents=True, exist_ok=True)
+
+    dir_50kb = _Path(args.dir_50kb)
+    dir_1mb  = _Path(args.dir_1mb) if args.dir_1mb else None
+
+    # ── Discover all 50 kbp bin files and seg-mean files ─────────────────
+    seg_bins = find_sample_files(dir_50kb, ".cna.seg")
+    seg_segs = find_sample_files(dir_50kb, ".seg.txt")
+    print(f"  Found {len(seg_bins)} 50 kbp bin files and "
+          f"{len(seg_segs)} seg-mean files in {dir_50kb}")
+
+    # ── Discover TF from params files if dir_1mb provided ────────────────
+    tf_lookup: dict[str, float] = {}
+    if dir_1mb is not None:
+        params_files = find_sample_files(dir_1mb, ".params.txt")
+        for samp, ppath in params_files.items():
+            try:
+                import re as _re
+                txt = ppath.read_text()
+                m = _re.search(r"tumor_fraction\s*=\s*([0-9.]+)", txt)
+                if m:
+                    tf_lookup[samp] = float(m.group(1))
+            except Exception:
+                pass
+        print(f"  Loaded TF for {len(tf_lookup)} samples from params files.")
+
+    # ── Build list of (sample_a, sample_b, tf_a, tf_b, label) tuples ─────
+    pairs: list[tuple[str, str, float | None, float | None, str | None]] = []
+
+    if args.pairs:
+        for pair_str in args.pairs:
+            if ":" not in pair_str:
+                print(f"  [WARN] Skipping malformed pair '{pair_str}' "
+                      f"(expected format 'SAMPLE_A:SAMPLE_B')")
+                continue
+            sa, sb = pair_str.split(":", 1)
+            pairs.append((sa.strip(), sb.strip(), None, None, None))
+    elif args.sample_a and args.sample_b:
+        pairs.append((args.sample_a, args.sample_b,
+                      args.tf_a, args.tf_b, args.label))
+    else:
+        print("  [ERROR] Specify either --sample-a/--sample-b or --pairs.")
+        sys.exit(1)
+
+    # ── Load COSMIC if provided ───────────────────────────────────────────
+    cosmic_df = None
+    if getattr(args, "cosmic_cgc", None):
+        try:
+            cosmic_df = load_cosmic_cgc(_Path(args.cosmic_cgc))
+            print(f"  Loaded {len(cosmic_df)} COSMIC CGC genes.")
+        except Exception as e:
+            print(f"  [WARN] Could not load COSMIC CGC: {e}")
+
+    # ── Focal amp TSV ─────────────────────────────────────────────────────
+    focal_tsv = _Path(args.focal_tsv) if getattr(args, "focal_tsv", None) else None
+
+    emergent_tsv = outdir / "emergent_cna_regions.tsv"
+    n_ok = 0
+
+    for sa, sb, tf_a_arg, tf_b_arg, pair_label in pairs:
+
+        # Resolve files
+        seg_bin_a = seg_bins.get(sa) or seg_bins.get(normalize_sample_name(sa))
+        seg_bin_b = seg_bins.get(sb) or seg_bins.get(normalize_sample_name(sb))
+        seg_seg_a = seg_segs.get(sa) or seg_segs.get(normalize_sample_name(sa))
+        seg_seg_b = seg_segs.get(sb) or seg_segs.get(normalize_sample_name(sb))
+
+        if seg_bin_a is None or seg_bin_b is None:
+            missing = ([sa] if seg_bin_a is None else []) + \
+                      ([sb] if seg_bin_b is None else [])
+            print(f"  [SKIP] {sa} vs {sb}: could not find 50 kbp bin files "
+                  f"for: {', '.join(missing)}")
+            available = sorted(seg_bins.keys())[:10]
+            print(f"         Available sample names (first 10): "
+                  f"{', '.join(available)}")
+            continue
+
+        # Resolve TFs
+        tf_a = tf_a_arg or tf_lookup.get(sa) or tf_lookup.get(
+            normalize_sample_name(sa))
+        tf_b = tf_b_arg or tf_lookup.get(sb) or tf_lookup.get(
+            normalize_sample_name(sb))
+        if tf_a is None or tf_b is None:
+            missing_tf = ([sa] if tf_a is None else []) + \
+                         ([sb] if tf_b is None else [])
+            print(f"  [SKIP] {sa} vs {sb}: tumor fraction unknown for "
+                  f"{', '.join(missing_tf)}. "
+                  f"Provide --tf-a/--tf-b or --dir-1mb for auto-detection.")
+            continue
+
+        # Patient and timepoints
+        patient = getattr(args, "patient", None) or sa.split("_")[0]
+        tp_a    = getattr(args, "timepoint_a", None) or 1
+        tp_b    = getattr(args, "timepoint_b", None) or 2
+
+        # Output stem: one file per pair
+        stem = f"{sa}_vs_{sb}"
+        out_path = outdir / stem
+
+        print(f"\n  Comparing: {sa} (TF={tf_a:.1%})  vs  {sb} (TF={tf_b:.1%})")
+        if pair_label:
+            print(f"             {pair_label}")
+
+        # Focal amp regions for this patient
+        focal_regions: list[dict] = []
+        if focal_tsv is not None and focal_tsv.exists():
+            try:
+                import pandas as pd
+                fdf = pd.read_csv(focal_tsv, sep="\t", low_memory=False)
+                pat_fdf = fdf[fdf["sample"].isin([sa, sb])]
+                if not pat_fdf.empty:
+                    focal_regions = [
+                        {
+                            "chrom":       str(r["chrom"]),
+                            "start":       int(r["start"]),
+                            "end":         int(r["end"]),
+                            "cosmic_genes": str(r.get("cosmic_genes", "")),
+                        }
+                        for _, r in pat_fdf.iterrows()
+                    ]
+            except Exception as e:
+                print(f"  [WARN] Could not read focal TSV: {e}")
+
+        try:
+            plot_longitudinal_combined(
+                sample_a             = sa,
+                sample_b             = sb,
+                seg_path_a           = seg_bin_a,
+                seg_path_b           = seg_bin_b,
+                seg_path_a_segs      = seg_seg_a,
+                seg_path_b_segs      = seg_seg_b,
+                tf_a                 = float(tf_a),
+                tf_b                 = float(tf_b),
+                timepoint_a          = tp_a,
+                timepoint_b          = tp_b,
+                patient              = patient,
+                entity               = "",
+                output_path          = out_path,
+                focal_regions        = focal_regions,
+                max_noise            = args.max_noise,
+                min_signal           = args.min_signal,
+                min_altered_fraction = args.min_altered_fraction,
+                plot_raw             = args.plot_raw,
+                emergent_min_bins    = args.emergent_min_bins,
+                emergent_min_delta   = args.emergent_min_delta,
+                emergent_tsv         = emergent_tsv,
+                clean_plots          = not args.no_clean_plots,
+            )
+            n_ok += 1
+        except Exception as e:
+            print(f"  [ERROR] {sa} vs {sb}: {e}")
+            import traceback
+            traceback.print_exc()
+
+    print(f"\n  Done: {n_ok}/{len(pairs)} pair(s) plotted → {outdir}")
+
+
 def _build_trajectories_parser(sub: argparse._SubParsersAction) -> None:
     p = sub.add_parser(
         "trajectories",
@@ -467,6 +729,7 @@ def main() -> None:
     _build_cbio_parser(sub)
     _build_focal_amps_parser(sub)
     _build_compare_parser(sub)
+    _build_compare_samples_parser(sub)
     _build_trajectories_parser(sub)
     _build_signatures_parser(sub)
 
@@ -490,7 +753,7 @@ def main() -> None:
     _NEEDS_1MB  = {"ichorcna", "focal-amps", "compare",
                    "trajectories", "signatures"}
     _NEEDS_50KB = {"ichorcna", "focal-amps", "compare",
-                   "trajectories", "signatures"}
+                   "trajectories", "signatures", "compare-samples"}
     missing = []
     if args.command in _NEEDS_1MB  and not getattr(args, "dir_1mb",  None):
         missing.append("--dir-1mb")
