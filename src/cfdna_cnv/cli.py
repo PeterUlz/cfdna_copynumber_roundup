@@ -588,6 +588,193 @@ def _run_trajectories(args: argparse.Namespace) -> None:
 # signatures — CN signature extraction via sigminer
 # ---------------------------------------------------------------------------
 
+def _build_gene_trajectories_parser(sub: argparse._SubParsersAction) -> None:
+    p = sub.add_parser(
+        "gene-trajectories",
+        help="Gene- or region-centric CN trajectories: find all patients "
+             "with a given gene amplified (or overlapping a genomic region) "
+             "and plot CN trajectories across their timepoints.",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+        epilog="""
+Examples:
+  # By gene name:
+  cfdna-cnv gene-trajectories \\
+      --dir-50kb /runs/50kb --dir-1mb /runs/1mb \\
+      --gene AR --entity Prostate \\
+      --focal-tsv results/focal_amplifications.tsv \\
+      --output gene_trajectories
+
+  # By explicit region (chrX:66500000-67500000):
+  cfdna-cnv gene-trajectories \\
+      --dir-50kb /runs/50kb --dir-1mb /runs/1mb \\
+      --region chrX:66500000-67500000 \\
+      --focal-tsv results/focal_amplifications.tsv \\
+      --output gene_trajectories
+
+  # Region with custom label and entity filter:
+  cfdna-cnv gene-trajectories \\
+      --dir-50kb /runs/50kb --dir-1mb /runs/1mb \\
+      --region chrX:66500000-67500000 --region-label AR_locus \\
+      --entity Prostate \\
+      --focal-tsv results/focal_amplifications.tsv \\
+      --output gene_trajectories
+
+  # Multiple genes:
+  cfdna-cnv gene-trajectories \\
+      --dir-50kb /runs/50kb --dir-1mb /runs/1mb \\
+      --gene EGFR MYC CCND1 \\
+      --focal-tsv results/focal_amplifications.tsv \\
+      --output gene_trajectories
+""",
+    )
+    _add_common_ichorcna_args(p)
+    p.add_argument("--dir-50kb", default=None,
+                   help="Directory containing ichorCNA 50 kbp run output.")
+    p.add_argument("--dir-1mb",  default=None,
+                   help="Directory containing ichorCNA 1 Mbp run output "
+                        "(used for TF lookup).")
+    p.add_argument("--focal-tsv", default=None, metavar="FILE",
+                   help="Path to focal_amplifications.tsv. Required when "
+                        "using --gene; optional with --region.")
+    p.add_argument("--tf-tsv", default=None, metavar="FILE",
+                   help="Path to tf_summary.tsv (for TF and timepoint lookup). "
+                        "If omitted, requires --dir-1mb.")
+
+    # ── What to plot ─────────────────────────────────────────────────────
+    grp = p.add_mutually_exclusive_group(required=True)
+    grp.add_argument("--gene", nargs="+", metavar="GENE",
+                     help="Gene name(s) to plot (e.g. AR EGFR MYC). "
+                          "Case-insensitive, partial match against "
+                          "focal_amplifications.tsv cosmic_genes column.")
+    grp.add_argument("--region", metavar="CHR:START-END",
+                     help="Explicit genomic region, e.g. chrX:66500000-67500000. "
+                          "All patients with a focal amp overlapping this region "
+                          "are included; CN is measured in this window for ALL "
+                          "patients (not patient-specific coords).")
+
+    p.add_argument("--region-label", default=None, metavar="LABEL",
+                   help="Label to use in plot titles and filenames when "
+                        "--region is specified (default: the region string).")
+    p.add_argument("--entity", default=None, metavar="ENTITY",
+                   help="Restrict to patients from this entity "
+                        "(e.g. Prostate, Breast, Colorectal). "
+                        "Case-insensitive. Default: all entities.")
+    p.add_argument("--output", default="gene_trajectories",
+                   help="Output directory (default: gene_trajectories).")
+    p.add_argument("--min-tf", type=float, default=0.10,
+                   help="Min tumor fraction per timepoint (default 10%%).")
+    p.add_argument("--traj-min-reads", type=int, default=1_000_000,
+                   help="Min reads per timepoint (default 1,000,000).")
+    p.add_argument("--traj-max-scale", type=float, default=3.0,
+                   help="Max empirical scale factor (default 3.0).")
+    p.add_argument("--min-timepoints", type=int, default=2,
+                   help="Min qualifying timepoints per patient (default 2).")
+    p.set_defaults(func=_run_gene_trajectories)
+
+
+def _run_gene_trajectories(args: argparse.Namespace) -> None:
+    import re as _re
+    from pathlib import Path as _Path
+    import pandas as pd
+
+    from .common.io import find_sample_files, collect_tumor_fractions
+    from .ichorcna.longitudinal_plots import plot_gene_focal_trajectories
+
+    outdir = _Path(args.output)
+    outdir.mkdir(parents=True, exist_ok=True)
+
+    # ── Load tf_df ────────────────────────────────────────────────────────
+    tf_tsv = getattr(args, "tf_tsv", None)
+    if tf_tsv and _Path(tf_tsv).exists():
+        tf_df = pd.read_csv(_Path(tf_tsv), sep="\t")
+        print(f"  Loaded tf_summary from {tf_tsv} ({len(tf_df)} rows)")
+    elif getattr(args, "dir_1mb", None):
+        dir_1mb      = _Path(args.dir_1mb)
+        params_files = find_sample_files(dir_1mb, ".params.txt")
+        wig_files    = find_sample_files(dir_1mb, ".wig")
+        tf_df        = collect_tumor_fractions(params_files, wig_files)
+        print(f"  Collected TF for {len(tf_df)} samples from {dir_1mb}")
+    else:
+        print("  [ERROR] Provide either --tf-tsv or --dir-1mb to load TF data.")
+        sys.exit(1)
+
+    # ── Discover 50 kbp seg files ─────────────────────────────────────────
+    if not getattr(args, "dir_50kb", None):
+        print("  [ERROR] --dir-50kb is required.")
+        sys.exit(1)
+    dir_50kb       = _Path(args.dir_50kb)
+    seg_files_bins = find_sample_files(dir_50kb, ".cna.seg")
+    seg_files_segs = find_sample_files(dir_50kb, ".seg.txt")
+    print(f"  Found {len(seg_files_bins)} 50 kbp bin files.")
+
+    focal_tsv = _Path(args.focal_tsv) if getattr(args, "focal_tsv", None) else None
+
+    common_kw = dict(
+        tf_df          = tf_df,
+        seg_files_bins = seg_files_bins,
+        output_dir     = outdir,
+        seg_files_segs = seg_files_segs,
+        entity_filter  = args.entity,
+        min_tf         = args.min_tf,
+        min_reads      = getattr(args, "traj_min_reads", 1_000_000),
+        max_scale      = getattr(args, "traj_max_scale", 3.0),
+        min_timepoints = args.min_timepoints,
+    )
+
+    # ── Gene mode ─────────────────────────────────────────────────────────
+    if args.gene:
+        if focal_tsv is None:
+            print("  [ERROR] --focal-tsv is required when using --gene.")
+            sys.exit(1)
+        for gene in args.gene:
+            print(f"\n  === Gene: {gene} ===")
+            n = plot_gene_focal_trajectories(
+                gene      = gene,
+                focal_tsv = focal_tsv,
+                **common_kw,
+            )
+            print(f"  {gene}: {n} patient(s) plotted → {outdir}")
+
+    # ── Region mode ───────────────────────────────────────────────────────
+    elif args.region:
+        region_str = args.region.strip()
+        # Parse chrX:66500000-67500000 or chrX:66.5Mb-67.5Mb
+        m = _re.match(
+            r"^(chr[0-9XYM]+):([0-9]+(?:\.[0-9]+)?(?:Mb|Kb)?)"
+            r"-([0-9]+(?:\.[0-9]+)?(?:Mb|Kb)?)$",
+            region_str, _re.IGNORECASE,
+        )
+        if not m:
+            print(f"  [ERROR] Could not parse --region '{region_str}'. "
+                  f"Expected format: chrX:66500000-67500000 or chrX:66.5Mb-67.5Mb")
+            sys.exit(1)
+
+        def _parse_pos(s: str) -> int:
+            s = s.strip()
+            if s.lower().endswith("mb"):
+                return int(float(s[:-2]) * 1_000_000)
+            if s.lower().endswith("kb"):
+                return int(float(s[:-2]) * 1_000)
+            return int(s)
+
+        chrom = m.group(1)
+        if not chrom.startswith("chr"):
+            chrom = f"chr{chrom}"
+        start = _parse_pos(m.group(2))
+        end   = _parse_pos(m.group(3))
+        label = args.region_label or region_str.replace(":", "_").replace("-", "_")
+
+        print(f"\n  === Region: {chrom}:{start:,}-{end:,} (label: {label}) ===")
+        n = plot_gene_focal_trajectories(
+            gene           = label,
+            focal_tsv      = focal_tsv,
+            fixed_region   = {"chrom": chrom, "start": start, "end": end,
+                               "cosmic_genes": label},
+            **common_kw,
+        )
+        print(f"  Region {label}: {n} patient(s) plotted → {outdir}")
+
+
 def _build_signatures_parser(sub: argparse._SubParsersAction) -> None:
     p = sub.add_parser(
         "signatures",
@@ -731,6 +918,7 @@ def main() -> None:
     _build_compare_parser(sub)
     _build_compare_samples_parser(sub)
     _build_trajectories_parser(sub)
+    _build_gene_trajectories_parser(sub)
     _build_signatures_parser(sub)
 
     args = parser.parse_args()
@@ -753,7 +941,8 @@ def main() -> None:
     _NEEDS_1MB  = {"ichorcna", "focal-amps", "compare",
                    "trajectories", "signatures"}
     _NEEDS_50KB = {"ichorcna", "focal-amps", "compare",
-                   "trajectories", "signatures", "compare-samples"}
+                   "trajectories", "signatures", "compare-samples",
+                   "gene-trajectories"}
     missing = []
     if args.command in _NEEDS_1MB  and not getattr(args, "dir_1mb",  None):
         missing.append("--dir-1mb")

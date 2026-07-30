@@ -5,7 +5,6 @@ from .focal_amp import (  # noqa: F401
     stream_focal_amplifications,
     aggregate_focal_frequencies,
 )
-from .longitudinal import longitudinal_comparison, emergent_focal_amps  # noqa: F401
 from .plots import (  # noqa: F401
     plot_broad_cna_frequencies,
     plot_focal_amp_frequencies,

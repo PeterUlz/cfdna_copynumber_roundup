@@ -542,10 +542,12 @@ def plot_emergent_focal_amps(
         loci["has_gene"] = loci["cosmic_genes"].fillna("").astype(str) != ""
 
         # Draw lollipops — height = n_patients
+        # Fixed two-colour scheme matching the focal amp frequency plots:
+        # CGC driver gene = #d7191c, no known driver = #2c7bb6
         for _, row in loci.iterrows():
             x     = row["mid_genome"]
             h     = row["n_patients"]
-            color = "#ff6b6b" if row["has_gene"] else pal["gain"]
+            color = "#d7191c" if row["has_gene"] else "#2c7bb6"
             ax.vlines(x, 0, h, colors=color, linewidth=1.4,
                       alpha=0.8, zorder=2)
             ax.scatter(x, h, color=color, s=22, zorder=3,
@@ -566,7 +568,7 @@ def plot_emergent_focal_amps(
                 continue
             label_xs.append(x)
             ax.text(x, h + 0.3, gene.split(",")[0],
-                    fontsize=6.5, color="#b8860b",
+                    fontsize=6.5, color="#d7191c",
                     ha="center", va="bottom", rotation=90,
                     fontweight="bold", zorder=4)
 
@@ -591,8 +593,8 @@ def plot_emergent_focal_amps(
         )
 
         handles = [
-            mpatches.Patch(color=pal["gain"],  label="Emergent focal amp"),
-            mpatches.Patch(color="#ff6b6b",    label="Overlaps COSMIC CGC gene"),
+            mpatches.Patch(color="#2c7bb6", label="Emergent focal amp (no known CGC driver)"),
+            mpatches.Patch(color="#d7191c", label="Overlaps COSMIC CGC driver gene"),
         ]
         ax.legend(handles=handles, fontsize=7.5, loc="lower left",
                   facecolor="white",   edgecolor="#cccccc",

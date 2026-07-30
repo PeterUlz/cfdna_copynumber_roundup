@@ -22,6 +22,7 @@ from ..ichorcna.longitudinal_plots import (
     plot_all_pairwise_longitudinal,
     plot_longitudinal_combined,
     plot_all_focal_amp_trajectories,
+    compute_scaled_tf_estimates,
 )
 from ..ichorcna.plots import (
     plot_broad_cna_frequencies,
@@ -256,8 +257,9 @@ def run(args: argparse.Namespace) -> None:
         }
         broad_freq = stream_broad_cna_frequencies(
             seg_1mb_hightf, high_tf_samples,
-            sample_entity = _sample_entity,
-            tf_df         = tf_df,   # deduplicate to one sample per patient
+            sample_entity  = _sample_entity,
+            tf_df          = tf_df,   # deduplicate to one sample per patient
+            min_abs_log2r  = getattr(args, "log2_delta", 0.2),
         )
         if not broad_freq.empty:
             broad_out = outdir / "broad_cna_frequencies.tsv"
@@ -493,6 +495,16 @@ def run(args: argparse.Namespace) -> None:
         )
         print(f"      Generated {n_traj} focal amp trajectory plot pair(s) "
               f"→ {focal_traj_dir}")
+
+        # ── TF estimates from empirical scaling ───────────────────────────
+        print(f"\n      Computing TF estimates from empirical scale factors …")
+        compute_scaled_tf_estimates(
+            tf_df          = _tf_for_longit,
+            seg_files      = seg_50k_bins,
+            seg_files_segs = seg_50k_files,
+            output_dir     = longit_plot_dir / "tf_estimates",
+            min_tf         = getattr(args, "tf_threshold", 0.03),
+        )
 
     # ── Summary ──────────────────────────────────────────────────────────────
 
