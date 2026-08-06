@@ -588,6 +588,71 @@ def _run_trajectories(args: argparse.Namespace) -> None:
 # signatures — CN signature extraction via sigminer
 # ---------------------------------------------------------------------------
 
+def _build_validate_tf_parser(sub: argparse._SubParsersAction) -> None:
+    p = sub.add_parser(
+        "validate-tf",
+        help="Validate tumor fraction estimates against a known in-silico "
+             "dilution series. Compares ichorCNA TF, scaling-based TF, and "
+             "expected (known) TF across replicates.",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+        epilog="""
+Metadata TSV format (tab-separated):
+    sample          sample name matching ichorCNA output file names
+    expected_tf     known dilution fraction (0–1), e.g. 0.50, 0.25, 0.125
+    series          identifier grouping dilutions from the same original sample
+    replicate       (optional) replicate number; auto-assigned if omitted
+    label           (optional) free-text label for the plot
+
+Example:
+    sample              expected_tf  series    replicate
+    P12_dil50_r1        0.50         P12       1
+    P12_dil50_r2        0.50         P12       2
+    P12_dil25_r1        0.25         P12       1
+    P12_undil_r1        0.82         P12       1
+
+    The highest expected_tf sample in each series is treated as the
+    reference for the empirical scaling step.
+
+Examples:
+  cfdna-cnv validate-tf \\
+      --metadata dilution_metadata.tsv \\
+      --dir-1mb /runs/1mb --dir-50kb /runs/50kb \\
+      --output tf_validation
+
+  # With a lower informative-bin threshold:
+  cfdna-cnv validate-tf \\
+      --metadata dilution_metadata.tsv \\
+      --dir-1mb /runs/1mb --dir-50kb /runs/50kb \\
+      --min-abs 0.10 --output tf_validation
+""",
+    )
+    p.add_argument("--metadata", required=True, metavar="TSV",
+                   help="Dilution metadata TSV (sample, expected_tf, series, "
+                        "optional: replicate, label).")
+    p.add_argument("--dir-1mb", required=True,
+                   help="ichorCNA 1 Mbp run directory (for .params.txt TF).")
+    p.add_argument("--dir-50kb", required=True,
+                   help="ichorCNA 50 kbp run directory (for scaling-based TF).")
+    p.add_argument("--output", default="tf_validation",
+                   help="Output directory (default: tf_validation).")
+    p.add_argument("--min-abs", type=float, default=0.05,
+                   help="Min |log2R| for bins included in WLS fit (default 0.05).")
+    p.set_defaults(func=_run_validate_tf)
+
+
+def _run_validate_tf(args: argparse.Namespace) -> None:
+    from pathlib import Path as _Path
+    from .validate_tf import run_tf_validation
+
+    run_tf_validation(
+        meta_tsv   = _Path(args.metadata),
+        dir_1mb    = _Path(args.dir_1mb),
+        dir_50kb   = _Path(args.dir_50kb),
+        output_dir = _Path(args.output),
+        min_abs    = args.min_abs,
+    )
+
+
 def _build_gene_trajectories_parser(sub: argparse._SubParsersAction) -> None:
     p = sub.add_parser(
         "gene-trajectories",
@@ -920,6 +985,7 @@ def main() -> None:
     _build_trajectories_parser(sub)
     _build_gene_trajectories_parser(sub)
     _build_signatures_parser(sub)
+    _build_validate_tf_parser(sub)
 
     args = parser.parse_args()
 

@@ -16,7 +16,7 @@ from ..common.cosmic import load_cosmic_cgc
 from ..common.io import (find_sample_files, collect_tumor_fractions,
                           parse_wig_total_reads, filter_seg_files_by_tf_df)
 from ..ichorcna.qc import find_incomplete_runs, validate_all_seg_files
-from ..ichorcna.longitudinal import longitudinal_comparison, emergent_focal_amps
+from ..ichorcna.longitudinal import emergent_focal_amps
 from ..ichorcna.focal_amp_plots import plot_all_focal_amp_diagnostics
 from ..ichorcna.longitudinal_plots import (
     plot_all_pairwise_longitudinal,
@@ -402,7 +402,12 @@ def run(args: argparse.Namespace) -> None:
                 focal_for_longit = focal_for_longit.rename(
                     columns={_cn_col: "copy.number"})
 
-    longit = longitudinal_comparison(focal_for_longit, tf_df)
+    longit = pd.DataFrame()
+    try:
+        from ..ichorcna.longitudinal import longitudinal_comparison
+        longit = longitudinal_comparison(focal_for_longit, tf_df)
+    except ImportError:
+        pass
     longit_out = outdir / "longitudinal_comparison.tsv"
     longit.to_csv(longit_out, sep="\t", index=False)
     patients_tracked = longit["patient"].nunique() if not longit.empty else 0
