@@ -38,6 +38,10 @@ _SEG_RENAME: dict[str, str] = {
     "log2_ratio":         "logr",
     "logr_copy_number":   "logr",
     "logr.copy.number":   "logr",
+    # ichorCNA .cna.seg prefixed column variants (after prefix stripping)
+    "logr_copy_ratio":    "logr",
+    "corrected_logr":     "logr",
+    "log2copyratio":      "logr",
     # other ichorCNA columns kept as-is
     "num.mark":         "num.mark",
     "subclone.status":  "subclone.status",
@@ -360,23 +364,34 @@ def _strip_sample_prefix(columns: list[str]) -> list[str]:
     """
     Detect and strip a sample-name prefix that ichorCNA prepends to data columns.
     E.g. "B163_6_R1.copy.number" → "copy.number".
+    Also handles sample names with dots, e.g.:
+    "B13_1_dilution_0.100_rep1.logR" → "logR"
     Coordinate columns (chr, start, end, …) are never modified.
     """
     # Find the prefix by looking for the first non-coord column whose bare
-    # suffix (after the first dot) matches a known data column name.
+    # suffix (after the last matching dot boundary) is a known data column.
     prefix: str | None = None
     known_suffixes = {k.replace(".", "_") for k in _SEG_RENAME}
     known_bare = {"copy.number", "event", "logr", "corrected_call",
-                  "corrected_copy_number", "logr_copy_number", "subclone.status"}
+                  "corrected_copy_number", "logr_copy_number",
+                  "logr_copy_ratio", "subclone.status",
+                  "corrected_logr", "log2copyratio"}
+
     for col in columns:
         if col.lower() in _COORD_COLS_LOWER:
             continue
-        if "." in col:
-            pfx, rest = col.split(".", 1)
+        # Try splitting at each dot position from right to left
+        # so we find the longest prefix (= full sample name)
+        parts = col.split(".")
+        for split_at in range(len(parts) - 1, 0, -1):
+            pfx  = ".".join(parts[:split_at])
+            rest = ".".join(parts[split_at:])
             if (rest.lower().replace(".", "_") in known_suffixes
                     or rest.lower() in known_bare):
                 prefix = pfx + "."
                 break
+        if prefix is not None:
+            break
 
     if prefix is None:
         return columns
