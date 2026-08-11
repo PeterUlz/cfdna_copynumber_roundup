@@ -732,6 +732,9 @@ Examples:
                    help="Min reads per timepoint (default 1,000,000).")
     p.add_argument("--traj-max-scale", type=float, default=3.0,
                    help="Max empirical scale factor (default 3.0).")
+    p.add_argument("--patients", nargs="+", default=None, metavar="PATIENT",
+                   help="Restrict to specific patient IDs (e.g. P12 P34 P91). "
+                        "Default: all patients with the gene amplified.")
     p.add_argument("--min-timepoints", type=int, default=2,
                    help="Min qualifying timepoints per patient (default 2).")
     p.set_defaults(func=_run_gene_trajectories)
@@ -775,15 +778,16 @@ def _run_gene_trajectories(args: argparse.Namespace) -> None:
     focal_tsv = _Path(args.focal_tsv) if getattr(args, "focal_tsv", None) else None
 
     common_kw = dict(
-        tf_df          = tf_df,
-        seg_files_bins = seg_files_bins,
-        output_dir     = outdir,
-        seg_files_segs = seg_files_segs,
-        entity_filter  = args.entity,
-        min_tf         = args.min_tf,
-        min_reads      = getattr(args, "traj_min_reads", 1_000_000),
-        max_scale      = getattr(args, "traj_max_scale", 3.0),
-        min_timepoints = args.min_timepoints,
+        tf_df           = tf_df,
+        seg_files_bins  = seg_files_bins,
+        output_dir      = outdir,
+        seg_files_segs  = seg_files_segs,
+        entity_filter   = args.entity,
+        min_tf          = args.min_tf,
+        min_reads       = getattr(args, "traj_min_reads", 1_000_000),
+        max_scale       = getattr(args, "traj_max_scale", 3.0),
+        min_timepoints  = args.min_timepoints,
+        patient_filter  = getattr(args, "patients", None),
     )
 
     # ── Gene mode ─────────────────────────────────────────────────────────

@@ -258,7 +258,8 @@ def _load_bins_with_seg_means(
 
     logr_col_bins = _get_log2_col_from_df(df_bins)
     if logr_col_bins is None:
-        print(f"      [WARN] No logR column in bins file {seg_path_bins.name}")
+        print(f"      [WARN] No logR column in bins file {seg_path_bins.name}. "
+              f"Columns found: {list(df_bins.columns)}")
         return None
 
     df_bins = df_bins[df_bins["chrom"].isin(_OFFSETS)].copy()
@@ -329,11 +330,22 @@ def _load_bins_with_seg_means(
 
 def _get_log2_col_from_df(df: pd.DataFrame) -> str | None:
     """Return the first recognised log2-ratio column in df."""
-    candidates = ["logr", "log2_ratio", "log2ratio", "seg.mean",
-                  "median", "logr_copy_ratio"]
+    candidates = [
+        "logr", "log2_ratio", "log2ratio", "seg.mean",
+        "median", "logr_copy_ratio",
+        # ichorCNA-specific variants (case-insensitive check below)
+        "logR", "Corrected_logR", "copy.number.corrected",
+        "logCopyRatio", "log2CopyRatio",
+    ]
+    # First try exact match (fast)
     for c in candidates:
         if c in df.columns:
             return c
+    # Then try case-insensitive match
+    lower_map = {c.lower(): c for c in df.columns}
+    for c in candidates:
+        if c.lower() in lower_map:
+            return lower_map[c.lower()]
     return None
 
 
@@ -865,17 +877,39 @@ def plot_longitudinal_combined(
             aligned["logr_a"].values, aligned["logr_b"].values)
         def _scale(df): out=df.copy(); out["logr_corrected"]*=best_m; return out
         bins_b_raw = _scale(bins_b_raw)
+        # ichorCNA-TF-ratio correction: scale lower-TF sample by tf_a/tf_b
+        tf_ratio = tf_a / tf_b if tf_b > 0 else 1.0
+        def _scale_tf(df): out=df.copy(); out["logr_corrected"]*=tf_ratio; return out
+        bins_b_raw_tfratio = _scale_tf(_load_bins(seg_path_b, sample_b, tf_from=tf_b))
+        bins_a_raw_tfratio = _load_bins(seg_path_a, sample_a, tf_from=tf_a)
     else:
         best_m, _ = _optimise_scaling(
             aligned["logr_b"].values, aligned["logr_a"].values)
         def _scale(df): out=df.copy(); out["logr_corrected"]*=best_m; return out
         bins_a_raw = _scale(bins_a_raw)
+        # ichorCNA-TF-ratio correction: scale lower-TF sample by tf_b/tf_a
+        tf_ratio = tf_b / tf_a if tf_a > 0 else 1.0
+        def _scale_tf(df): out=df.copy(); out["logr_corrected"]*=tf_ratio; return out
+        bins_a_raw_tfratio = _scale_tf(_load_bins(seg_path_a, sample_a, tf_from=tf_a))
+        bins_b_raw_tfratio = _load_bins(seg_path_b, sample_b, tf_from=tf_b)
 
-    # ── Smooth scaled raw bins ───────────────────────────────────────────────
+    # Guard against None from _load_bins in tf-ratio path
+    if bins_a_raw_tfratio is None:
+        bins_a_raw_tfratio = bins_a_raw
+    if bins_b_raw_tfratio is None:
+        bins_b_raw_tfratio = bins_b_raw
+
+    # ── Smooth scaled raw bins (empirical) ──────────────────────────────────
     bins_a_s5  = _smooth(bins_a_raw,  5)
     bins_b_s5  = _smooth(bins_b_raw,  5)
     bins_a_s10 = _smooth(bins_a_raw, 10)
     bins_b_s10 = _smooth(bins_b_raw, 10)
+
+    # ── Smooth TF-ratio bins ────────────────────────────────────────────────
+    bins_a_s5_tf  = _smooth(bins_a_raw_tfratio,  5)
+    bins_b_s5_tf  = _smooth(bins_b_raw_tfratio,  5)
+    bins_a_s10_tf = _smooth(bins_a_raw_tfratio, 10)
+    bins_b_s10_tf = _smooth(bins_b_raw_tfratio, 10)
 
     # ── Signal metrics on smoothed bins (for title / SNR filter) ────────────
     q_a, n_above_a, _, snr_a = _signal_metrics(bins_a_s10)
@@ -920,6 +954,10 @@ def plot_longitudinal_combined(
     title_l1  = (f"{patient}  ({entity})   "
                  f"{tp_a_str} (TF={tf_a:.1%})  vs  {tp_b_str} (TF={tf_b:.1%})"
                  f"   scale={best_m:.2f}  noise={noise_str}")
+    title_l1_tf = (f"{patient}  ({entity})   "
+                   f"{tp_a_str} (TF={tf_a:.1%})  vs  {tp_b_str} (TF={tf_b:.1%})"
+                   f"   TF-ratio={tf_ratio:.2f}  noise={noise_str}  "
+                   f"[ichorCNA-TF correction]")
     title_l2  = (f"{tp_a_str}: p95={q_a:.3f}  snr={snr_a:.2f}  "
                  f"altered={frac_a:.3f}    "
                  f"{tp_b_str}: p95={q_b:.3f}  snr={snr_b:.2f}  "
@@ -1087,6 +1125,28 @@ def plot_longitudinal_combined(
         _render(bins_a_s10, bins_b_s10, diff_s10,
                 pub_out.with_name(pub_out.name + "_pub_smooth10"),
                 "10-bin smooth", pub=True)
+
+    # ── ichorCNA-TF-ratio correction variants ────────────────────────────────
+    # Same plots but using ichorCNA TF ratio (tf_high/tf_low) for correction
+    # instead of the empirical WLS scale factor. Useful for direct comparison
+    # of the two correction approaches.
+    tfratio_dir = output_path.parent / "tf_ratio"
+    tfratio_dir.mkdir(parents=True, exist_ok=True)
+    tfratio_out = tfratio_dir / output_path.name
+
+    diff_s5_tf  = _smooth(_diff(bins_a_s5_tf,  bins_b_s5_tf),  5,  col="delta_logr")
+    diff_s10_tf = _smooth(_diff(bins_a_s10_tf, bins_b_s10_tf), 10, col="delta_logr")
+
+    # Temporarily swap title_l1 for the TF-ratio version
+    _orig_title_l1 = title_l1
+    title_l1 = title_l1_tf
+    _render(bins_a_s5_tf,  bins_b_s5_tf,  diff_s5_tf,
+            tfratio_out.with_name(tfratio_out.name + "_tfratio_smooth5"),
+            "5-bin smooth [ichorCNA TF ratio]")
+    _render(bins_a_s10_tf, bins_b_s10_tf, diff_s10_tf,
+            tfratio_out.with_name(tfratio_out.name + "_tfratio_smooth10"),
+            "10-bin smooth [ichorCNA TF ratio]")
+    title_l1 = _orig_title_l1
 
 # ---------------------------------------------------------------------------
 # Batch: one combined plot per consecutive pair per patient
@@ -2695,6 +2755,7 @@ def plot_gene_focal_trajectories(
         min_timepoints: int   = 2,
         logr_ylim:      tuple[float, float] = (-0.5, 3.5),
         fixed_region:   dict | None = None,
+        patient_filter: list[str] | None = None,
 ) -> int:
     """
     Gene- or region-centric CN trajectory plot.
@@ -2816,8 +2877,13 @@ def plot_gene_focal_trajectories(
     has_reads = "total_reads" in df.columns
 
     # Keep only patients who have at least one sample with the gene amp
+    if patient_filter:
+        print(f"  [gene trajectories] Patient filter: {patient_filter}")
+
     qualifying_patients = []
     for patient, pat_df in df.groupby("patient"):
+        if patient_filter and str(patient) not in patient_filter:
+            continue
         pat_df = pat_df.sort_values("timepoint")
         # Gene mode: skip patients without the gene amp.
         # Region mode with empty gene_samples: include all patients.
