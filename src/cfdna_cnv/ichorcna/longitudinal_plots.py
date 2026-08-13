@@ -3054,10 +3054,9 @@ def plot_gene_focal_trajectories(
         return 0
 
     # ── Colour palette — one colour per patient ───────────────────────────
-    n_patients = len(patient_data)
-    _PAT_CMAP  = plt.colormaps.get_cmap("tab20" if n_patients > 10 else "tab10")
-    pat_colors = {d["patient"]: _PAT_CMAP(i % _PAT_CMAP.N)
-                  for i, d in enumerate(patient_data)}
+    n_patients  = len(patient_data)
+    pat_colors  = {d["patient"]: _trajectory_palette(n_patients)[i]
+                   for i, d in enumerate(patient_data)}
 
     entity_label   = f" — {entity_filter}" if entity_filter else ""
     region_str     = (f"{gene_region['chrom']}:{gene_region['start']//1_000_000:.2f}"
@@ -3404,3 +3403,370 @@ def compute_scaled_tf_estimates(
     print(f"  [tf estimates] Scatter plot written.")
 
     return result
+
+
+# ---------------------------------------------------------------------------
+# Cohort-level focal amp stability overview
+# ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# Cohort-level focal amp stability overview
+# ---------------------------------------------------------------------------
+
+def _collect_stability_data(
+        focal_tsv:      Path,
+        tf_df:          pd.DataFrame,
+        seg_files_bins: dict[str, Path],
+        seg_files_segs: dict[str, Path] | None,
+        min_tf:         float,
+        min_reads:      int,
+        max_scale:      float,
+        min_timepoints: int,
+) -> list[dict]:
+    """
+    Shared data collection for both stability plots.
+
+    For every qualifying patient, collect per-region mean log2R at each
+    qualifying timepoint (normalised to 1, 2, 3, …).
+
+    Returns a list of dicts, one per (patient, region, timepoint):
+        patient, region_key, cosmic_genes, chrom, start, end,
+        timepoint_norm, timepoint_orig, sample, tf, scale_factor, log2r
+    """
+    focal_df = pd.read_csv(focal_tsv, sep="\t", low_memory=False)
+    if focal_df.empty or "sample" not in focal_df.columns:
+        return []
+    focal_df = focal_df.copy()
+    focal_df["chrom"] = focal_df["chrom"].astype(str).apply(
+        lambda c: c if c.startswith("chr") else f"chr{c}")
+    if "cosmic_genes" not in focal_df.columns:
+        focal_df["cosmic_genes"] = ""
+    focal_df["cosmic_genes"] = focal_df["cosmic_genes"].fillna("").astype(str)
+    focal_samples = set(focal_df["sample"].unique())
+
+    df = tf_df.dropna(subset=["timepoint", "tumor_fraction"]).copy()
+    df = df[df["tumor_fraction"] >= min_tf]
+    df["timepoint"] = df["timepoint"].astype(int)
+    df = df[df["sample"].isin(seg_files_bins)]
+    has_reads = "total_reads" in df.columns
+
+    rows: list[dict] = []
+
+    for patient, pat_df in df.groupby("patient"):
+        pat_df = pat_df.sort_values("timepoint")
+        if pat_df["timepoint"].nunique() < min_timepoints:
+            continue
+        pat_samples = set(pat_df["sample"])
+        if not (pat_samples & focal_samples):
+            continue
+
+        samples    = pat_df["sample"].tolist()
+        tfs        = pat_df["tumor_fraction"].tolist()
+        timepoints = pat_df["timepoint"].tolist()
+        reads_list = pat_df["total_reads"].tolist() if has_reads else [None]*len(samples)
+
+        # Scale factors
+        ref_tf   = max(tfs)
+        ref_idx  = tfs.index(ref_tf)
+        ref_samp = samples[ref_idx]
+        scale_factors = [1.0] * len(samples)
+        ref_path      = seg_files_bins.get(ref_samp)
+        ref_segs_path = (seg_files_segs or {}).get(ref_samp)
+        ref_segmeans  = None
+        if ref_path is not None and ref_segs_path is not None:
+            ref_segmeans = _load_bins_with_seg_means(
+                ref_path, ref_segs_path, ref_samp, tf_from=ref_tf)
+        for i, (samp, tf) in enumerate(zip(samples, tfs)):
+            if i == ref_idx:
+                continue
+            m = None
+            seg_path  = seg_files_bins.get(samp)
+            segs_path = (seg_files_segs or {}).get(samp)
+            if ref_segmeans is not None and seg_path and segs_path:
+                sm = _load_bins_with_seg_means(seg_path, segs_path, samp, tf)
+                if sm is not None and not sm.empty:
+                    al = _align_bins(ref_segmeans, sm)
+                    if not al.empty:
+                        m, _ = _optimise_scaling(
+                            al["logr_a"].values, al["logr_b"].values)
+            if m is None:
+                m = (ref_tf / tf) if tf > 0 else 1.0
+            scale_factors[i] = m
+
+        # Focal regions
+        pat_focal = focal_df[focal_df["sample"].isin(pat_samples)]
+        regions   = _merge_overlapping([
+            {"chrom": r["chrom"], "start": int(r["start"]),
+             "end": int(r["end"]), "cosmic_genes": str(r.get("cosmic_genes", ""))}
+            for _, r in pat_focal.iterrows()
+        ])
+        if not regions:
+            continue
+
+        # Per-timepoint log2R per region, dropping filtered samples
+        tp_data: list[tuple] = []  # (orig_tp, samp, tf, m, log2r_per_region)
+        for i, (samp, tp, tf, m, reads) in enumerate(zip(
+                samples, timepoints, tfs, scale_factors, reads_list)):
+            if i != ref_idx:
+                if reads is not None and reads < min_reads:
+                    continue
+                if m > max_scale:
+                    continue
+            seg_path = seg_files_bins.get(samp)
+            if seg_path is None:
+                continue
+            bins_df = _load_bins(seg_path, samp, tf_from=tf)
+            if bins_df is None or bins_df.empty:
+                continue
+            if m != 1.0:
+                bins_df = bins_df.copy()
+                bins_df["logr_corrected"] *= m
+            region_logrs = {}
+            for region in regions:
+                rkey = f"{region['chrom']}:{region['start']}-{region['end']}"
+                mean, _, _ = _region_logr_stats(bins_df, region)
+                region_logrs[rkey] = mean
+            tp_data.append((tp, samp, tf, m, region_logrs))
+
+        if len(tp_data) < min_timepoints:
+            continue
+
+        # Normalise timepoints to 1, 2, 3, ...
+        norm_tp = {orig: norm for norm, (orig, *_) in enumerate(tp_data, 1)}
+
+        for orig_tp, samp, tf, m, region_logrs in tp_data:
+            for region in regions:
+                rkey  = f"{region['chrom']}:{region['start']}-{region['end']}"
+                log2r = region_logrs.get(rkey, float("nan"))
+                if np.isnan(log2r):
+                    continue
+                genes = region.get("cosmic_genes", "")
+                label = (genes.split(",")[0].strip()
+                         if genes and genes.lower() != "nan"
+                         else rkey)
+                rows.append({
+                    "patient":        str(patient),
+                    "region_key":     rkey,
+                    "region_label":   label,
+                    "chrom":          region["chrom"],
+                    "start":          region["start"],
+                    "end":            region["end"],
+                    "timepoint_norm": norm_tp[orig_tp],
+                    "timepoint_orig": orig_tp,
+                    "sample":         samp,
+                    "tumor_fraction": round(tf, 4),
+                    "scale_factor":   round(m, 4),
+                    "log2r":          round(log2r, 4),
+                })
+
+    return rows
+
+
+def plot_focal_amp_cohort_stability(
+        focal_tsv:      Path,
+        tf_df:          pd.DataFrame,
+        seg_files_bins: dict[str, Path],
+        output_dir:     Path,
+        seg_files_segs: dict[str, Path] | None = None,
+        min_tf:         float = 0.10,
+        min_reads:      int   = 1_000_000,
+        max_scale:      float = 3.0,
+        min_timepoints: int   = 2,
+        logr_ylim:      tuple[float, float] = (-0.5, 4.0),
+) -> int:
+    """
+    Trajectory plot: x = normalised timepoint, y = TF-corrected log2R.
+    One grey line per patient-region combination, all overlaid.
+    Shows that focal amp copy numbers are stable across timepoints at the
+    cohort level.
+    """
+    from .plots import _save as _plots_save
+
+    if not focal_tsv.exists() or focal_tsv.stat().st_size == 0:
+        return 0
+
+    rows = _collect_stability_data(
+        focal_tsv, tf_df, seg_files_bins, seg_files_segs,
+        min_tf, min_reads, max_scale, min_timepoints)
+    if not rows:
+        print("  [stability] No qualifying data.")
+        return 0
+
+    data = pd.DataFrame(rows)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    data.to_csv(output_dir / "focal_amp_cohort_stability.tsv",
+                sep="\t", index=False)
+
+    n_lines = data.groupby(["patient", "region_key"]).ngroups
+    max_tp  = int(data["timepoint_norm"].max())
+
+    fig, ax = plt.subplots(figsize=(max(6, max_tp * 1.5), 5.5), facecolor="white")
+    ax.set_facecolor("white")
+    for spine in ax.spines.values():
+        spine.set_edgecolor("#cccccc"); spine.set_linewidth(0.6)
+    ax.axhline(0, color="#bbbbbb", linewidth=0.7, linestyle="-", zorder=1)
+    for ref in (0.58, 1.0, 1.5, 2.0):
+        ax.axhline(ref, color="#dddddd", linewidth=0.4, linestyle=":", zorder=1)
+
+    for (patient, rkey), grp in data.groupby(["patient", "region_key"]):
+        grp = grp.sort_values("timepoint_norm")
+        x   = grp["timepoint_norm"].values
+        y   = np.clip(grp["log2r"].values, *logr_ylim)
+        ax.plot(x, y, color="#888888", linewidth=0.8, alpha=0.35,
+                marker="o", markersize=3, markeredgewidth=0,
+                zorder=2, solid_capstyle="round")
+
+    ax.set_xlim(0.5, max_tp + 0.5)
+    ax.set_xticks(range(1, max_tp + 1))
+    ax.set_xticklabels([f"TP{i}" for i in range(1, max_tp + 1)],
+                       fontsize=8, color="#444444")
+    ax.set_ylim(logr_ylim)
+    ax.set_xlabel("Timepoint (normalised per patient)", fontsize=9, color="#444444")
+    ax.set_ylabel("TF-corrected log2 ratio", fontsize=9, color="#444444")
+    ax.yaxis.set_major_locator(mticker.MultipleLocator(0.5))
+    ax.yaxis.set_major_formatter(mticker.FormatStrFormatter("%.1f"))
+    ax.set_title(
+        f"Focal amplification stability across timepoints — "
+        f"{n_lines} patient×region trajectories  |  "
+        f"{data['patient'].nunique()} patients\n"
+        f"One grey line per patient×focal amp region  |  "
+        f"TF ≥ {min_tf:.0%}, reads ≥ {min_reads//1_000_000}M, scale ≤ {max_scale:.1f}×",
+        fontsize=9, fontweight="bold", color="#222222", loc="left",
+    )
+    fig.tight_layout()
+    _plots_save(fig, output_dir / "focal_amp_cohort_stability")
+    print(f"  [stability] {n_lines} trajectories, {data['patient'].nunique()} patients "
+          f"→ focal_amp_cohort_stability.pdf/png + .tsv")
+    return n_lines
+
+
+def plot_focal_amp_stability_focused(
+        focal_tsv:      Path,
+        tf_df:          pd.DataFrame,
+        seg_files_bins: dict[str, Path],
+        output_dir:     Path,
+        seg_files_segs: dict[str, Path] | None = None,
+        min_tf:         float = 0.10,
+        min_reads:      int   = 1_000_000,
+        max_scale:      float = 3.0,
+        min_timepoints: int   = 2,
+        delta_threshold: float = 0.5,
+        logr_ylim:      tuple[float, float] = (-0.5, 4.0),
+) -> int:
+    """
+    Same trajectory layout as plot_focal_amp_cohort_stability but colour-coded:
+
+    - Grey  (#888888): stable — max Δlog2R ≤ delta_threshold across all timepoints
+    - Red   (CLEAN_PALETTE["gain"]): gained — log2R increases by > delta_threshold
+                                     from an earlier to a later timepoint
+                                     (novel focal amp acquisition)
+    - Blue  (CLEAN_PALETTE["loss"]): lost — log2R decreases by > delta_threshold
+                                     from an earlier to a later timepoint
+                                     (focal amp regression)
+
+    A trajectory can be both gained and lost (e.g. amp appears then
+    disappears); in that case it is coloured by the last direction of change.
+    """
+    from .plots import _save as _plots_save
+
+    if not focal_tsv.exists() or focal_tsv.stat().st_size == 0:
+        return 0
+
+    rows = _collect_stability_data(
+        focal_tsv, tf_df, seg_files_bins, seg_files_segs,
+        min_tf, min_reads, max_scale, min_timepoints)
+    if not rows:
+        print("  [stability-focused] No qualifying data.")
+        return 0
+
+    data    = pd.DataFrame(rows)
+    max_tp  = int(data["timepoint_norm"].max())
+
+    COL_STABLE = "#888888"
+    COL_GAIN   = CLEAN_PALETTE["gain"]   # #d7191c
+    COL_LOSS   = CLEAN_PALETTE["loss"]   # #2c7bb6
+
+    n_stable = n_gain = n_loss = n_both = 0
+
+    fig, ax = plt.subplots(figsize=(max(6, max_tp * 1.5), 5.5), facecolor="white")
+    ax.set_facecolor("white")
+    for spine in ax.spines.values():
+        spine.set_edgecolor("#cccccc"); spine.set_linewidth(0.6)
+    ax.axhline(0, color="#bbbbbb", linewidth=0.7, linestyle="-", zorder=1)
+    for ref in (0.58, 1.0, 1.5, 2.0):
+        ax.axhline(ref, color="#dddddd", linewidth=0.4, linestyle=":", zorder=1)
+
+    for (patient, rkey), grp in data.groupby(["patient", "region_key"]):
+        grp = grp.sort_values("timepoint_norm")
+        x   = grp["timepoint_norm"].values
+        y   = np.clip(grp["log2r"].values, *logr_ylim)
+
+        if len(y) < 2:
+            ax.scatter(x, y, color=COL_STABLE, s=12, alpha=0.4,
+                       linewidths=0, zorder=2)
+            n_stable += 1
+            continue
+
+        # Detect direction: compare each consecutive pair
+        has_gain = any(y[j] - y[i] >  delta_threshold
+                       for i, j in zip(range(len(y)-1), range(1, len(y))))
+        has_loss = any(y[i] - y[j] >  delta_threshold
+                       for i, j in zip(range(len(y)-1), range(1, len(y))))
+
+        if has_gain and has_loss:
+            color  = COL_GAIN   # mixed — flag as gain (acquisition dominant)
+            alpha  = 0.80; lw = 1.6; zo = 4; ms = 4
+            n_both += 1
+        elif has_gain:
+            color  = COL_GAIN
+            alpha  = 0.80; lw = 1.6; zo = 4; ms = 4
+            n_gain += 1
+        elif has_loss:
+            color  = COL_LOSS
+            alpha  = 0.80; lw = 1.6; zo = 4; ms = 4
+            n_loss += 1
+        else:
+            color  = COL_STABLE
+            alpha  = 0.25; lw = 0.7; zo = 2; ms = 2.5
+            n_stable += 1
+
+        ax.plot(x, y, color=color, linewidth=lw, alpha=alpha,
+                marker="o", markersize=ms, markeredgewidth=0,
+                zorder=zo, solid_capstyle="round")
+
+    ax.set_xlim(0.5, max_tp + 0.5)
+    ax.set_xticks(range(1, max_tp + 1))
+    ax.set_xticklabels([f"TP{i}" for i in range(1, max_tp + 1)],
+                       fontsize=8, color="#444444")
+    ax.set_ylim(logr_ylim)
+    ax.set_xlabel("Timepoint (normalised per patient)", fontsize=9, color="#444444")
+    ax.set_ylabel("TF-corrected log2 ratio", fontsize=9, color="#444444")
+    ax.yaxis.set_major_locator(mticker.MultipleLocator(0.5))
+    ax.yaxis.set_major_formatter(mticker.FormatStrFormatter("%.1f"))
+
+    ax.legend(handles=[
+        plt.Line2D([0], [0], color=COL_STABLE, linewidth=1.5, alpha=0.5,
+                   marker="o", markersize=4, markeredgewidth=0,
+                   label=f"Stable (Δlog2R ≤ {delta_threshold}, n={n_stable})"),
+        plt.Line2D([0], [0], color=COL_GAIN, linewidth=1.8,
+                   marker="o", markersize=5, markeredgewidth=0,
+                   label=f"Gain (log2R ↑ > {delta_threshold}, n={n_gain + n_both})"),
+        plt.Line2D([0], [0], color=COL_LOSS, linewidth=1.8,
+                   marker="o", markersize=5, markeredgewidth=0,
+                   label=f"Loss (log2R ↓ > {delta_threshold}, n={n_loss})"),
+    ], fontsize=8, loc="upper right", frameon=True,
+       facecolor="white", edgecolor="#cccccc")
+
+    n_total = n_stable + n_gain + n_loss + n_both
+    ax.set_title(
+        f"Focal amplification CN dynamics — "
+        f"{n_total} patient×region trajectories  |  "
+        f"{data['patient'].nunique()} patients\n"
+        f"Threshold: Δlog2R > {delta_threshold} between any two consecutive timepoints",
+        fontsize=9, fontweight="bold", color="#222222", loc="left",
+    )
+    fig.tight_layout()
+    _plots_save(fig, output_dir / "focal_amp_stability_focused")
+    print(f"  [stability-focused] stable={n_stable}, gain={n_gain + n_both}, "
+          f"loss={n_loss} → focal_amp_stability_focused.pdf/png")
+    return n_total

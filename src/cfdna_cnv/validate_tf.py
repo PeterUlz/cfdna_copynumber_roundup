@@ -366,7 +366,10 @@ def run_tf_validation(
     # ── Plots ──────────────────────────────────────────────────────────────
     _plot_tf_validation(dil, output_dir)
     _plot_tf_deviation_histogram(dil, output_dir)
-    _plot_dilution_ratios(dil, output_dir, full_result=result)
+    dil = _plot_dilution_ratios(dil, output_dir, full_result=result)
+
+    # ── Statistical tests ──────────────────────────────────────────────────
+    compute_statistical_comparison(dil, output_dir)
 
     return result
 
@@ -818,3 +821,201 @@ def _plot_dilution_ratios(dil: pd.DataFrame, output_dir: Path,
     )
     _save(fig2, output_dir / "tf_dilution_ratio_histogram")
     print(f"  Histogram written: tf_dilution_ratio_histogram.pdf/png")
+    return dil   # return with ratio columns added for downstream stats
+
+
+def _ccc(y_true: np.ndarray, y_pred: np.ndarray) -> float:
+    """
+    Lin's Concordance Correlation Coefficient.
+    CCC = 2 * cov(x,y) / (var(x) + var(y) + (mean(x) - mean(y))^2)
+    Ranges from -1 to 1; 1 = perfect concordance.
+    """
+    mask = np.isfinite(y_true) & np.isfinite(y_pred)
+    if mask.sum() < 3:
+        return float("nan")
+    yt = y_true[mask]; yp = y_pred[mask]
+    mu_t = yt.mean(); mu_p = yp.mean()
+    var_t = yt.var();  var_p = yp.var()
+    cov   = float(np.cov(yt, yp)[0, 1])
+    denom = var_t + var_p + (mu_t - mu_p) ** 2
+    return float(2 * cov / denom) if denom > 0 else float("nan")
+
+
+def compute_statistical_comparison(
+        dil:        pd.DataFrame,
+        output_dir: Path,
+        n_boot:     int = 2000,
+        seed:       int = 42,
+) -> pd.DataFrame:
+    """
+    Two statistical comparisons of ichorCNA vs scaling-based dilution ratios,
+    properly accounting for the nested structure (replicates within series).
+
+    Method 1 — Per-series CCC + paired Wilcoxon
+    ─────────────────────────────────────────────
+    Compute Lin's CCC(method, expected_ratio) separately for each series.
+    Each series is one independent biological unit, so we get one CCC per
+    series per method.  A paired Wilcoxon signed-rank test on the per-series
+    CCCs tests whether one method is consistently better across series.
+    Bootstrap 95% CIs on the mean CCC are also computed.
+
+    Method 2 — Linear mixed-effects model
+    ──────────────────────────────────────
+    Model: |error| ~ method + expected_ratio + (1 | series)
+    where method ∈ {ichorCNA, scaling} and series is a random intercept.
+    The method coefficient directly tests whether scaling has lower absolute
+    error than ichorCNA after controlling for series-level variation.
+    Requires statsmodels; if not available, falls back to a note.
+
+    Outputs
+    ───────
+    tf_stats_ccc_per_series.tsv    — per-series CCC for each method
+    tf_stats_summary.tsv           — summary table with CCCs, Wilcoxon result,
+                                     mixed model coefficient and p-value
+    Printed summary to console.
+    """
+    rng = np.random.default_rng(seed)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    dil = dil.copy()
+    for col in ["expected_ratio", "ichorcna_ratio", "scaling_ratio"]:
+        if col not in dil.columns:
+            print(f"  [stats] Column '{col}' not found — "
+                  f"run _plot_dilution_ratios first or check output.")
+            return pd.DataFrame()
+
+    dil["expected_ratio"] = pd.to_numeric(dil["expected_ratio"], errors="coerce")
+    dil["ichorcna_ratio"] = pd.to_numeric(dil["ichorcna_ratio"], errors="coerce")
+    dil["scaling_ratio"]  = pd.to_numeric(dil["scaling_ratio"],  errors="coerce")
+    dil = dil.dropna(subset=["expected_ratio"])
+
+    # ── Method 1: Per-series CCC ──────────────────────────────────────────
+    print("\n  ── Statistical comparison: per-series CCC ──────────────────")
+    ccc_rows = []
+    for series, grp in dil.groupby("series"):
+        exp = grp["expected_ratio"].values.astype(float)
+        ccc_i = _ccc(exp, grp["ichorcna_ratio"].values.astype(float))
+        ccc_s = _ccc(exp, grp["scaling_ratio"].values.astype(float))
+        ccc_rows.append({
+            "series":       series,
+            "n":            len(grp),
+            "ccc_ichorCNA": round(ccc_i, 4),
+            "ccc_scaling":  round(ccc_s, 4),
+        })
+
+    ccc_df = pd.DataFrame(ccc_rows)
+    ccc_tsv = output_dir / "tf_stats_ccc_per_series.tsv"
+    ccc_df.to_csv(ccc_tsv, sep="\t", index=False)
+    print(f"  Per-series CCC (written to {ccc_tsv.name}):")
+    print(f"  {'Series':<25} {'N':>5} {'CCC ichorCNA':>14} {'CCC scaling':>12}")
+    print(f"  {'-'*58}")
+    for _, row in ccc_df.iterrows():
+        print(f"  {row['series']:<25} {int(row['n']):>5} "
+              f"{row['ccc_ichorCNA']:>14.4f} {row['ccc_scaling']:>12.4f}")
+
+    # Paired Wilcoxon on per-series CCCs
+    valid = ccc_df.dropna(subset=["ccc_ichorCNA", "ccc_scaling"])
+    wilcox_p = wilcox_stat = float("nan")
+    if len(valid) >= 3:
+        try:
+            from scipy.stats import wilcoxon
+            stat, wilcox_p = wilcoxon(
+                valid["ccc_ichorCNA"].values,
+                valid["ccc_scaling"].values,
+                alternative="less",   # H1: ichorCNA CCC < scaling CCC
+            )
+            wilcox_stat = float(stat)
+        except ImportError:
+            print("  [stats] scipy not available — Wilcoxon test skipped.")
+
+    # Bootstrap CIs on mean CCC per method
+    def _boot_mean_ci(vals, n_boot, rng):
+        vals = vals[np.isfinite(vals)]
+        if len(vals) < 2:
+            return float("nan"), float("nan")
+        boot = [rng.choice(vals, len(vals), replace=True).mean()
+                for _ in range(n_boot)]
+        return float(np.percentile(boot, 2.5)), float(np.percentile(boot, 97.5))
+
+    ci_i_lo, ci_i_hi = _boot_mean_ci(valid["ccc_ichorCNA"].values, n_boot, rng)
+    ci_s_lo, ci_s_hi = _boot_mean_ci(valid["ccc_scaling"].values,  n_boot, rng)
+    mean_ccc_i = float(valid["ccc_ichorCNA"].mean())
+    mean_ccc_s = float(valid["ccc_scaling"].mean())
+
+    print(f"\n  Mean CCC ichorCNA: {mean_ccc_i:.4f} "
+          f"(95% CI: {ci_i_lo:.4f}–{ci_i_hi:.4f})")
+    print(f"  Mean CCC scaling:  {mean_ccc_s:.4f} "
+          f"(95% CI: {ci_s_lo:.4f}–{ci_s_hi:.4f})")
+    if not np.isnan(wilcox_p):
+        print(f"  Paired Wilcoxon (H1: CCC_ichorCNA < CCC_scaling): "
+              f"W={wilcox_stat:.1f}, p={wilcox_p:.4f} "
+              f"({'significant' if wilcox_p < 0.05 else 'not significant'} at α=0.05)")
+
+    # ── Method 2: Linear mixed-effects model ─────────────────────────────
+    print("\n  ── Statistical comparison: linear mixed-effects model ───────")
+    lme_coef = lme_se = lme_p = float("nan")
+    lme_note = ""
+    try:
+        import statsmodels.formula.api as smf
+
+        # Build long-form: one row per sample × method
+        rows_i = dil[["series", "expected_ratio", "ichorcna_ratio"]].copy()
+        rows_i = rows_i.rename(columns={"ichorcna_ratio": "ratio"})
+        rows_i["method"] = "ichorCNA"
+        rows_s = dil[["series", "expected_ratio", "scaling_ratio"]].copy()
+        rows_s = rows_s.rename(columns={"scaling_ratio": "ratio"})
+        rows_s["method"] = "scaling"
+        long_df = pd.concat([rows_i, rows_s], ignore_index=True)
+        long_df["abs_error"] = (
+            pd.to_numeric(long_df["ratio"],        errors="coerce") -
+            pd.to_numeric(long_df["expected_ratio"], errors="coerce")
+        ).abs()
+        long_df = long_df.dropna(subset=["abs_error"])
+        # method dummy: ichorCNA=0, scaling=1
+        long_df["method_scaling"] = (long_df["method"] == "scaling").astype(float)
+
+        md  = smf.mixedlm(
+            "abs_error ~ method_scaling + expected_ratio",
+            data    = long_df,
+            groups  = long_df["series"],
+        )
+        mdf = md.fit(reml=True)
+        lme_coef = float(mdf.params["method_scaling"])
+        lme_se   = float(mdf.bse["method_scaling"])
+        lme_p    = float(mdf.pvalues["method_scaling"])
+        lme_note = (f"  Mixed model: |error| ~ method + expected_ratio + (1|series)\n"
+                    f"  Coefficient for 'scaling vs ichorCNA': "
+                    f"{lme_coef:+.4f} ± {lme_se:.4f}  "
+                    f"(p = {lme_p:.4f})\n"
+                    f"  Negative coefficient = scaling has lower absolute error.")
+        print(lme_note)
+
+    except ImportError:
+        lme_note = "statsmodels not installed — install with: pip install statsmodels"
+        print(f"  [stats] {lme_note}")
+    except Exception as e:
+        lme_note = f"Mixed model failed: {e}"
+        print(f"  [stats] {lme_note}")
+
+    # ── Summary TSV ───────────────────────────────────────────────────────
+    summary = pd.DataFrame([{
+        "metric":              "CCC",
+        "ichorCNA_mean":       round(mean_ccc_i, 4),
+        "ichorCNA_CI_lo":      round(ci_i_lo, 4),
+        "ichorCNA_CI_hi":      round(ci_i_hi, 4),
+        "scaling_mean":        round(mean_ccc_s, 4),
+        "scaling_CI_lo":       round(ci_s_lo, 4),
+        "scaling_CI_hi":       round(ci_s_hi, 4),
+        "wilcoxon_W":          round(wilcox_stat, 2) if not np.isnan(wilcox_stat) else None,
+        "wilcoxon_p":          round(wilcox_p, 4)    if not np.isnan(wilcox_p)    else None,
+        "lme_coef_scaling":    round(lme_coef, 4)    if not np.isnan(lme_coef)    else None,
+        "lme_se":              round(lme_se, 4)       if not np.isnan(lme_se)      else None,
+        "lme_p":               round(lme_p, 4)        if not np.isnan(lme_p)       else None,
+        "n_series":            len(valid),
+        "notes":               lme_note.replace("\n", " ").strip(),
+    }])
+    summ_tsv = output_dir / "tf_stats_summary.tsv"
+    summary.to_csv(summ_tsv, sep="\t", index=False)
+    print(f"\n  Written: {summ_tsv.name}")
+
+    return summary

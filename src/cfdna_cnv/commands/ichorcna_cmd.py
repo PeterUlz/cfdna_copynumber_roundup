@@ -23,6 +23,8 @@ from ..ichorcna.longitudinal_plots import (
     plot_longitudinal_combined,
     plot_all_focal_amp_trajectories,
     compute_scaled_tf_estimates,
+    plot_focal_amp_cohort_stability,
+    plot_focal_amp_stability_focused,
 )
 from ..ichorcna.plots import (
     plot_broad_cna_frequencies,
@@ -500,6 +502,34 @@ def run(args: argparse.Namespace) -> None:
         )
         print(f"      Generated {n_traj} focal amp trajectory plot pair(s) "
               f"→ {focal_traj_dir}")
+
+        # Cohort-level stability overview
+        print(f"\n      Generating cohort focal amp stability plot …")
+        n_stab = plot_focal_amp_cohort_stability(
+            focal_tsv      = outdir / "focal_amplifications.tsv",
+            tf_df          = _tf_for_longit,
+            seg_files_bins = seg_50k_bins,
+            output_dir     = longit_plot_dir / "focal_amp_trajectories",
+            seg_files_segs = seg_50k_files,
+            min_tf         = 0.10,
+            min_reads      = 1_000_000,
+            max_scale      = 3.0,
+            min_timepoints = 2,
+        )
+        print(f"      Stability plot: {n_stab} samples included.")
+
+        plot_focal_amp_stability_focused(
+            focal_tsv      = outdir / "focal_amplifications.tsv",
+            tf_df          = _tf_for_longit,
+            seg_files_bins = seg_50k_bins,
+            output_dir     = longit_plot_dir / "focal_amp_trajectories",
+            seg_files_segs = seg_50k_files,
+            min_tf         = 0.10,
+            min_reads      = 1_000_000,
+            max_scale      = 3.0,
+            min_timepoints = 2,
+            delta_threshold = 0.5,
+        )
 
         # ── TF estimates from empirical scaling ───────────────────────────
         print(f"\n      Computing TF estimates from empirical scale factors …")

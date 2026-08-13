@@ -454,9 +454,19 @@ def parse_seg_file(seg_path: Path, sample: str) -> pd.DataFrame | None:
             df[col] = pd.to_numeric(df[col], errors="coerce")
 
     # If the file had an "ID" column it was already renamed to "sample"
-    # by _SEG_RENAME.  Only overwrite if the column is missing or blank.
+    # by _SEG_RENAME.  Always normalise — ichorCNA writes the raw file-system
+    # name (e.g. "B621_3_PS_Avenio_S19_L002_R1_001") into this column, which
+    # must be stripped to the canonical form before use.
     if "sample" not in df.columns or df["sample"].isna().all():
         df["sample"] = sample
+    else:
+        # Normalise whatever ichorCNA wrote, then fall back to the caller's
+        # (already normalised) sample name if the result looks wrong.
+        raw_vals = df["sample"].astype(str)
+        normed   = raw_vals.apply(normalize_sample_name)
+        # Sanity check: use caller's name if the file value normalises to
+        # something completely different (e.g. empty or all-numeric).
+        df["sample"] = normed.where(normed.str.len() > 0, sample)
     df["seg_length"] = df["end"] - df["start"]
     return df
 
