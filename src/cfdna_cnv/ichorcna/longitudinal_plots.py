@@ -1152,6 +1152,149 @@ def plot_longitudinal_combined(
 # Batch: one combined plot per consecutive pair per patient
 # ---------------------------------------------------------------------------
 
+
+
+def _collect_pair_tf_metrics(
+        patient: str, entity: str,
+        sample_a: str, sample_b: str,
+        timepoint_a: int, timepoint_b: int,
+        tf_a: float, tf_b: float,
+        seg_path_a: Path, seg_path_b: Path,
+        seg_path_a_segs: "Path | None",
+        seg_path_b_segs: "Path | None",
+        pair_rows: list,
+        delta_thresh: float = 0.2,
+) -> None:
+    """
+    Compute and append one row of TF-ratio vs scale-factor metrics for a
+    sequential pair of samples.
+
+    Metrics recorded:
+        tf_ratio_ichorCNA    : max(tf_a, tf_b) / min(tf_a, tf_b)
+        scale_factor         : empirical WLS scale factor m (>= 1)
+        scale_rmse           : WLS residual RMSE
+        n_bins_used          : informative bins in the WLS fit
+        ratio_discrepancy    : |tf_ratio_ichorCNA - scale_factor|
+        n_diff_bins_ichorcna : bins where |logR_A_scaled - logR_B_scaled| > delta_thresh
+                               after ichorCNA TF-ratio correction
+        n_diff_bins_scaling  : same after empirical scale-factor correction
+        n_total_bins         : total overlapping bins (denominator)
+        frac_diff_ichorcna   : n_diff_bins_ichorcna / n_total_bins
+        frac_diff_scaling    : n_diff_bins_scaling  / n_total_bins
+    """
+    if seg_path_a_segs is None or seg_path_b_segs is None:
+        return
+
+    ref_tf = max(tf_a, tf_b)
+    adj_tf = min(tf_a, tf_b)
+    tf_ratio_ichorcna = ref_tf / adj_tf if adj_tf > 0 else float("nan")
+
+    # ── Load raw 50 kbp bins for both samples ────────────────────────────
+    bins_a = _load_bins(seg_path_a, sample_a, tf_from=tf_a)
+    bins_b = _load_bins(seg_path_b, sample_b, tf_from=tf_b)
+
+    n_diff_ichorcna = n_diff_scaling = n_total = 0
+    rmsd_ichorcna = msd_perp_ichorcna = float("nan")
+    rmsd_scaling  = msd_perp_scaling  = float("nan")
+
+    if bins_a is not None and not bins_a.empty and bins_b is not None and not bins_b.empty:
+        aligned_bins = _align_bins(bins_a, bins_b)
+        if not aligned_bins.empty:
+            lf_raw = aligned_bins["logr_a"].values.astype(float)
+            la_raw = aligned_bins["logr_b"].values.astype(float)
+            valid  = np.isfinite(lf_raw) & np.isfinite(la_raw)
+            n_total = int(valid.sum())
+
+            if n_total > 0:
+                lf = lf_raw[valid]
+                la = la_raw[valid]
+
+                # ichorCNA correction: scale the lower-TF sample by tf_ratio
+                if tf_a >= tf_b:
+                    la_corr_ichorcna = la * tf_ratio_ichorcna
+                    lf_corr_ichorcna = lf
+                else:
+                    lf_corr_ichorcna = lf * tf_ratio_ichorcna
+                    la_corr_ichorcna = la
+                n_diff_ichorcna = int(np.sum(
+                    np.abs(lf_corr_ichorcna - la_corr_ichorcna) > delta_thresh
+                ))
+                diff_ichorcna = lf_corr_ichorcna - la_corr_ichorcna
+                rmsd_ichorcna    = float(np.sqrt(np.mean(diff_ichorcna ** 2)))
+                msd_perp_ichorcna = float(np.mean((diff_ichorcna / np.sqrt(2)) ** 2))
+
+    # ── Load segment means for WLS scale factor ───────────────────────────
+    m = rmse = float("nan")
+    n_bins_wls = 0
+    if seg_path_a_segs is not None and seg_path_b_segs is not None:
+        ref_seg = _load_bins_with_seg_means(seg_path_a, seg_path_a_segs,
+                                             sample_a, tf_from=tf_a)
+        adj_seg = _load_bins_with_seg_means(seg_path_b, seg_path_b_segs,
+                                             sample_b, tf_from=tf_b)
+        if tf_a < tf_b:
+            ref_seg, adj_seg = adj_seg, ref_seg
+
+        if ref_seg is not None and adj_seg is not None \
+                and not ref_seg.empty and not adj_seg.empty:
+            aligned_seg = _align_bins(ref_seg, adj_seg)
+            if not aligned_seg.empty:
+                lf_s = aligned_seg["logr_a"].values
+                la_s = aligned_seg["logr_b"].values
+                m, rmse = _optimise_scaling(lf_s, la_s)
+                n_bins_wls = int(np.sum(
+                    np.isfinite(lf_s) & np.isfinite(la_s) &
+                    (np.abs(lf_s) >= 0.05)
+                ))
+
+    # Scaling correction: apply m to the raw aligned bins
+    if n_total > 0 and np.isfinite(m):
+        if tf_a >= tf_b:
+            la_corr_scaling = la * m
+            lf_corr_scaling = lf
+        else:
+            lf_corr_scaling = lf * m
+            la_corr_scaling = la
+        n_diff_scaling    = int(np.sum(
+            np.abs(lf_corr_scaling - la_corr_scaling) > delta_thresh
+        ))
+        diff_scaling      = lf_corr_scaling - la_corr_scaling
+        rmsd_scaling      = float(np.sqrt(np.mean(diff_scaling ** 2)))
+        msd_perp_scaling  = float(np.mean((diff_scaling / np.sqrt(2)) ** 2))
+
+    discrepancy = (abs(tf_ratio_ichorcna - m)
+                   if np.isfinite(m) and np.isfinite(tf_ratio_ichorcna)
+                   else float("nan"))
+
+    pair_rows.append({
+        "patient":              patient,
+        "entity":               entity,
+        "sample_a":             sample_a,
+        "sample_b":             sample_b,
+        "timepoint_a":          timepoint_a,
+        "timepoint_b":          timepoint_b,
+        "tf_a":                 round(tf_a, 4),
+        "tf_b":                 round(tf_b, 4),
+        "tf_ref":               round(ref_tf, 4),
+        "tf_adj":               round(adj_tf, 4),
+        "tf_ratio_ichorCNA":    round(tf_ratio_ichorcna, 4),
+        "scale_factor":         round(m,    4) if np.isfinite(m)    else None,
+        "scale_rmse":           round(rmse, 4) if np.isfinite(rmse) else None,
+        "n_bins_used":          n_bins_wls,
+        "ratio_discrepancy":    round(discrepancy, 4) if np.isfinite(discrepancy) else None,
+        "n_total_bins":         n_total,
+        "n_diff_bins_ichorcna": n_diff_ichorcna,
+        "n_diff_bins_scaling":  n_diff_scaling if np.isfinite(m) else None,
+        "frac_diff_ichorcna":   round(n_diff_ichorcna / n_total, 4) if n_total > 0 else None,
+        "frac_diff_scaling":    round(n_diff_scaling  / n_total, 4) if (n_total > 0 and np.isfinite(m)) else None,
+        # Scatter-deviation metrics (distance from y=x identity line)
+        "rmsd_ichorcna":         round(rmsd_ichorcna,     4) if np.isfinite(rmsd_ichorcna)     else None,
+        "rmsd_scaling":          round(rmsd_scaling,      4) if np.isfinite(rmsd_scaling)      else None,
+        "msd_perp_ichorcna":     round(msd_perp_ichorcna, 4) if np.isfinite(msd_perp_ichorcna) else None,
+        "msd_perp_scaling":      round(msd_perp_scaling,  4) if np.isfinite(msd_perp_scaling)  else None,
+        "delta_thresh":         delta_thresh,
+    })
+
+
 def plot_all_pairwise_longitudinal(
         tf_df:                pd.DataFrame,
         seg_files:            dict[str, Path],
@@ -1196,7 +1339,8 @@ def plot_all_pairwise_longitudinal(
     df = df[df["tumor_fraction"] >= min_tf]
     df["timepoint"] = df["timepoint"].astype(int)
 
-    n_plots = 0
+    n_plots    = 0
+    pair_rows: list[dict] = []   # TF ratio vs scale factor per pair
 
     # Diagnostics — print once to help debug empty output
     n_multi = sum(1 for _, g in df.groupby("patient")
@@ -1228,6 +1372,18 @@ def plot_all_pairwise_longitudinal(
         samples    = pat_df["sample"].tolist()
         timepoints = pat_df["timepoint"].tolist()
         tfs        = pat_df["tumor_fraction"].tolist()
+        has_reads  = "total_reads" in pat_df.columns
+        def _safe_reads(val):
+            try:
+                v = float(val)
+                return int(v) if v == v else None  # NaN != NaN
+            except (TypeError, ValueError):
+                return None
+        reads_map: dict = {
+            row["sample"]: _safe_reads(row.get("total_reads")) if has_reads else None
+            for _, row in pat_df.iterrows()
+        }
+        min_reads_longit = 1_000_000  # consistent with trajectory filters
 
         for idx in range(len(samples) - 1):
             sa, sb   = samples[idx],    samples[idx + 1]
@@ -1269,6 +1425,26 @@ def plot_all_pairwise_longitudinal(
                 clean_plots          = clean_plots,
             )
             n_plots += 1
+            # Collect TF ratio vs scale factor for this pair
+            # Apply 1M reads filter before collecting pair metrics
+            reads_a = reads_map.get(sa)
+            reads_b = reads_map.get(sb)
+            if (reads_a is not None and reads_a < min_reads_longit) or \
+               (reads_b is not None and reads_b < min_reads_longit):
+                print(f"        [SKIP metrics] {patient} TP{tpa}->TP{tpb}: "
+                      f"reads {reads_a}/{reads_b} below {min_reads_longit:,}")
+            else:
+                _collect_pair_tf_metrics(
+                    patient=str(patient), entity=entity,
+                    sample_a=sa, sample_b=sb,
+                    timepoint_a=tpa, timepoint_b=tpb,
+                    tf_a=tfa, tf_b=tfb,
+                    seg_path_a=seg_files[sa],
+                    seg_path_b=seg_files[sb],
+                    seg_path_a_segs=seg_files_segs.get(sa) if seg_files_segs else None,
+                    seg_path_b_segs=seg_files_segs.get(sb) if seg_files_segs else None,
+                    pair_rows=pair_rows,
+                )
             gc.collect()
 
 
@@ -1284,6 +1460,13 @@ def plot_all_pairwise_longitudinal(
             output_dir     = output_dir,
         )
         gc.collect()
+    # Write per-pair TF ratio vs scale factor TSV
+    if pair_rows:
+        import pandas as pd
+        pair_tsv = output_dir / "tf_ratio_vs_scale_factor.tsv"
+        pd.DataFrame(pair_rows).to_csv(pair_tsv, sep="\t", index=False)
+        print(f"        Written: {pair_tsv}  ({len(pair_rows)} pairs)")
+
     return n_plots
 
 
@@ -2756,6 +2939,7 @@ def plot_gene_focal_trajectories(
         logr_ylim:      tuple[float, float] = (-0.5, 3.5),
         fixed_region:   dict | None = None,
         patient_filter: list[str] | None = None,
+        display_name:   str | None = None,
 ) -> int:
     """
     Gene- or region-centric CN trajectory plot.
@@ -2811,15 +2995,28 @@ def plot_gene_focal_trajectories(
             print(f"  [gene trajectories] No focal amp data or no cosmic_genes column.")
             return 0
 
+        def _gene_matches(cell: str, query: str) -> bool:
+            """
+            Return True if `query` exactly matches any gene name in `cell`.
+            Cell format: comma-separated gene names, e.g. "FGFR1,FGFR1OP,MYC".
+            Matching is case-insensitive but requires a full token match so
+            that e.g. "AR" does not match "FGFR1" or "FGFR1OP", and "FGFR1"
+            does not match "FGFR1OP".
+            """
+            if not cell or cell == "nan":
+                return False
+            q = query.strip().lower()
+            return any(g.strip().lower() == q for g in cell.split(","))
+
         gene_mask = (
             focal_df["cosmic_genes"]
             .fillna("").astype(str)
-            .str.lower()
-            .str.contains(gene.lower(), regex=False)
+            .apply(lambda c: _gene_matches(c, gene))
         )
         gene_df = focal_df[gene_mask].copy()
         if gene_df.empty:
-            print(f"  [gene trajectories] No focal amps found for gene '{gene}'.")
+            print(f"  [gene trajectories] No focal amps found for gene '{gene}' "
+                  f"(exact match in comma-separated cosmic_genes).")
             return 0
 
         gene_df["chrom"] = gene_df["chrom"].astype(str).apply(
@@ -3064,9 +3261,13 @@ def plot_gene_focal_trajectories(
     n_amp_patients = sum(1 for d in patient_data if d["has_amp"])
     print(f"  [gene trajectories] {n_amp_patients} patients with '{gene}' amp "
           f"in qualifying samples (of {len(patient_data)} with longitudinal data)")
-    title = (f"{gene} focal amplification trajectories{entity_label}\n"
+    # display_name overrides the gene name shown in plot titles/legends
+    # (e.g. when using --region with a gene not in CGC, you can still show
+    # a clean gene name instead of region coordinates)
+    plot_name = display_name if display_name else gene
+    title = (f"{plot_name} focal amplification trajectories{entity_label}\n"
              f"Cohort region: {region_str}   |   "
-             f"{n_amp_patients} patients with {gene} amp   |   "
+             f"{n_amp_patients} patients with {plot_name} amp   |   "
              f"each patient uses their own focal amp coordinates   |   "
              f"error bars = IQR of 50 kbp bins")
 
@@ -3128,7 +3329,7 @@ def plot_gene_focal_trajectories(
             frameon=True,
             facecolor="white",
             edgecolor="#cccccc",
-            title=f"{gene}-amplified patients",
+            title=f"{plot_name}-amplified patients",
             title_fontsize=7.0,
         )
         # Expand figure width to accommodate legend

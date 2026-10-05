@@ -9,7 +9,6 @@ Focused commands (ichorCNA data):
     focal-amps       Detect and plot focal amplifications across a cohort
     compare          Pairwise longitudinal CN comparison for two timepoints
     trajectories     CN trajectories of focal amps across patient timepoints
-    signatures       Copy-number signature analysis (sigminer)
 """
 from __future__ import annotations
 
@@ -80,8 +79,7 @@ def _add_focal_amp_args(p: argparse.ArgumentParser) -> None:
 def _build_ichorcna_parser(sub: argparse._SubParsersAction) -> None:
     p = sub.add_parser(
         "ichorcna",
-        help="Full ichorCNA analysis pipeline (broad CNA + focal amps + "
-             "longitudinal + signatures).",
+        help="Full ichorCNA analysis pipeline (broad CNA + focal amps + longitudinal).",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     _add_common_ichorcna_args(p)
@@ -114,31 +112,6 @@ def _build_ichorcna_parser(sub: argparse._SubParsersAction) -> None:
                    help="Min |delta log2R| for emergent CNA (default 0.5).")
     p.add_argument("--no-clean-plots", action="store_true",
                    help="Disable clean publication-style longitudinal plots.")
-    p.add_argument("--sigminer", action="store_true",
-                   help="Run sigminer CN signature analysis.")
-    p.add_argument("--sigminer-ref", nargs="+", default=["CNS_TCGA"], metavar="REF",
-                   help="Reference signature sets (default: CNS_TCGA).")
-    p.add_argument("--sigminer-min-tf", type=float, default=0.15,
-                   help="Min TF for sigminer (default 15%%).")
-    p.add_argument("--sigminer-genome", default="hg38",
-                   choices=["hg38", "hg19"],
-                   help="Reference genome for sigminer.")
-    p.add_argument("--sigminer-cores", type=int, default=1,
-                   help="Parallel cores for sigminer.")
-    p.add_argument("--sigminer-n-sig", type=int, default=6,
-                   help="Number of de novo CN signatures to extract.")
-    p.add_argument("--sigminer-no-run", action="store_true",
-                   help="Prepare R script only, do not execute.")
-    p.add_argument("--liquidcna", action="store_true",
-                   help="Run liquidCNA subclonal evolution analysis.")
-    p.add_argument("--liquidcna-functions", default=None, metavar="FILE",
-                   help="Path to mixture_estimation_functions.R.")
-    p.add_argument("--liquidcna-min-tf", type=float, default=0.20,
-                   help="Min TF for liquidCNA (default 20%%).")
-    p.add_argument("--liquidcna-min-timepoints", type=int, default=2,
-                   help="Min qualifying timepoints for liquidCNA (default 2).")
-    p.add_argument("--liquidcna-no-run", action="store_true",
-                   help="Prepare inputs only, do not execute Rscript.")
     p.set_defaults(func=_run_ichorcna)
 
 
@@ -151,7 +124,7 @@ def _build_focal_amps_parser(sub: argparse._SubParsersAction) -> None:
         "focal-amps",
         help="Detect focal amplifications and compute cohort-level frequencies "
              "from ichorCNA output. Runs broad CNA + focal amp detection only "
-             "(no longitudinal, no signatures).",
+             "(no longitudinal).",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
         epilog="""
 Examples:
@@ -188,8 +161,6 @@ def _run_focal_amps(args: argparse.Namespace) -> None:
     args.emergent_min_bins     = 3
     args.emergent_min_delta    = 0.5
     args.no_clean_plots        = True
-    args.sigminer              = False
-    args.liquidcna             = False
     from .commands.ichorcna_cmd import run
     run(args)
 
@@ -249,8 +220,6 @@ def _run_compare(args: argparse.Namespace) -> None:
     """Delegate to ichorcna_cmd.run with longitudinal plots enabled."""
     args.longitudinal_plots    = True
     args.longitudinal_plot_dir = getattr(args, "longitudinal_plot_dir", None)
-    args.sigminer              = False
-    args.liquidcna             = False
     from .commands.ichorcna_cmd import run
     run(args)
 
@@ -576,17 +545,11 @@ def _run_trajectories(args: argparse.Namespace) -> None:
     args.emergent_min_bins     = 3
     args.emergent_min_delta    = 0.5
     args.no_clean_plots        = False
-    args.sigminer              = False
-    args.liquidcna             = False
     # traj-specific args get picked up directly by plot_all_focal_amp_trajectories
     # via the ichorcna_cmd run function
     from .commands.ichorcna_cmd import run
     run(args)
 
-
-# ---------------------------------------------------------------------------
-# signatures — CN signature extraction via sigminer
-# ---------------------------------------------------------------------------
 
 def _build_validate_tf_parser(sub: argparse._SubParsersAction) -> None:
     p = sub.add_parser(
@@ -719,7 +682,15 @@ Examples:
 
     p.add_argument("--region-label", default=None, metavar="LABEL",
                    help="Label to use in plot titles and filenames when "
-                        "--region is specified (default: the region string).")
+                        "--region is specified (default: the region string). "
+                        "Use this to show a gene name instead of coordinates, "
+                        "e.g. --region-label MYCN.")
+    p.add_argument("--gene-label", default=None, metavar="LABEL",
+                   help="Override the display name shown in the plot title "
+                        "for either --gene or --region mode. Useful when the "
+                        "gene is not in the Cancer Gene Census and you want to "
+                        "show a clean name instead of region coordinates, "
+                        "e.g. --gene-label MYCN.")
     p.add_argument("--entity", default=None, metavar="ENTITY",
                    help="Restrict to patients from this entity "
                         "(e.g. Prostate, Breast, Colorectal). "
@@ -788,6 +759,7 @@ def _run_gene_trajectories(args: argparse.Namespace) -> None:
         max_scale       = getattr(args, "traj_max_scale", 3.0),
         min_timepoints  = args.min_timepoints,
         patient_filter  = getattr(args, "patients", None),
+        display_name    = getattr(args, "gene_label", None),
     )
 
     # ── Gene mode ─────────────────────────────────────────────────────────
@@ -842,79 +814,6 @@ def _run_gene_trajectories(args: argparse.Namespace) -> None:
             **common_kw,
         )
         print(f"  Region {label}: {n} patient(s) plotted → {outdir}")
-
-
-def _build_signatures_parser(sub: argparse._SubParsersAction) -> None:
-    p = sub.add_parser(
-        "signatures",
-        help="Extract copy-number signatures from ichorCNA output using "
-             "sigminer (R). Performs de novo NMF extraction and maps to "
-             "COSMIC CN reference signatures.",
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
-        epilog="""
-Requires R packages: r-sigminer r-ggplot2 r-ggplotify r-dplyr (add to pixi.toml)
-
-Examples:
-  cfdna-cnv signatures --dir-1mb /runs/1mb --dir-50kb /runs/50kb \\
-      --output signature_results
-
-  # Extract 8 signatures and compare to multiple references:
-  cfdna-cnv signatures --dir-1mb /runs/1mb --dir-50kb /runs/50kb \\
-      --sig-n-sig 8 --sig-ref CNS_TCGA CNS_PCAWG176
-""",
-    )
-    _add_common_ichorcna_args(p)
-    p.add_argument("--dir-1mb",  default=None,
-                   help="Directory containing ichorCNA 1 Mbp run output.")
-    p.add_argument("--dir-50kb", default=None,
-                   help="Directory containing ichorCNA 50 kbp run output.")
-    p.add_argument("--output", default="signature_results",
-                   help="Output directory (default: signature_results).")
-    p.add_argument("--sig-min-tf", type=float, default=0.15,
-                   help="Min TF to include a sample (default 15%%).")
-    p.add_argument("--sig-ref", nargs="+", default=["CNS_TCGA"], metavar="REF",
-                   help="Reference signature sets. Options: CNS_TCGA, "
-                        "CNS_USARC, CNS_TCGA176, CNS_PCAWG176 "
-                        "(default: CNS_TCGA).")
-    p.add_argument("--sig-n-sig", type=int, default=6,
-                   help="Number of de novo signatures to extract (default 6).")
-    p.add_argument("--sig-genome", default="hg38",
-                   choices=["hg38", "hg19"],
-                   help="Reference genome (default hg38).")
-    p.add_argument("--sig-cores", type=int, default=1,
-                   help="Parallel cores for NMF (default 1).")
-    p.add_argument("--sig-no-run", action="store_true",
-                   help="Write R script only, do not execute Rscript.")
-    _add_focal_amp_args(p)
-    p.add_argument("--skip-validation", action="store_true",
-                   help="Skip segment file validation.")
-    p.add_argument("--plot-bin-size", type=int, default=5_000_000,
-                   help="Bin size for broad CNA frequency plot.")
-    p.set_defaults(func=_run_signatures)
-
-
-def _run_signatures(args: argparse.Namespace) -> None:
-    """Delegate to ichorcna_cmd.run with sigminer enabled."""
-    # Map sig-* args → internal sigminer_* names
-    args.sigminer         = True
-    args.sigminer_ref     = args.sig_ref
-    args.sigminer_min_tf  = args.sig_min_tf
-    args.sigminer_genome  = args.sig_genome
-    args.sigminer_cores   = args.sig_cores
-    args.sigminer_n_sig   = args.sig_n_sig
-    args.sigminer_no_run  = args.sig_no_run
-    args.longitudinal_plots   = False
-    args.longitudinal_plot_dir = None
-    args.max_noise            = 0.15
-    args.min_signal           = None
-    args.min_altered_fraction = 0.05
-    args.plot_raw             = False
-    args.emergent_min_bins    = 3
-    args.emergent_min_delta   = 0.5
-    args.no_clean_plots       = True
-    args.liquidcna            = False
-    from .commands.ichorcna_cmd import run
-    run(args)
 
 
 # ---------------------------------------------------------------------------
@@ -988,7 +887,6 @@ def main() -> None:
     _build_compare_samples_parser(sub)
     _build_trajectories_parser(sub)
     _build_gene_trajectories_parser(sub)
-    _build_signatures_parser(sub)
     _build_validate_tf_parser(sub)
 
     args = parser.parse_args()
@@ -1008,11 +906,9 @@ def main() -> None:
         args       = apply_config_to_namespace(args, cfg, sub_parser)
 
     # ── Validate required inputs after config merge ──────────────────────
-    _NEEDS_1MB  = {"ichorcna", "focal-amps", "compare",
-                   "trajectories", "signatures"}
-    _NEEDS_50KB = {"ichorcna", "focal-amps", "compare",
-                   "trajectories", "signatures", "compare-samples",
-                   "gene-trajectories"}
+    _NEEDS_1MB  = {"ichorcna", "focal-amps", "compare", "trajectories"}
+    _NEEDS_50KB = {"ichorcna", "focal-amps", "compare", "trajectories",
+                   "compare-samples", "gene-trajectories"}
     missing = []
     if args.command in _NEEDS_1MB  and not getattr(args, "dir_1mb",  None):
         missing.append("--dir-1mb")

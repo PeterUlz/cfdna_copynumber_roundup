@@ -218,6 +218,136 @@ def plot_broad_cna_frequencies(
     _save(fig, output_path)
 
 
+def plot_broad_cna_frequencies_lowtf(
+        broad_tsv:   Path,
+        tf_tsv:      Path,
+        output_path: Path,
+        bin_size:    int   = 5_000_000,
+        min_freq:    float = 0.05,
+        tf_low:      float = 0.03,
+        tf_high:     float = 0.10,
+        entities:    list[str] | None = None,
+) -> None:
+    """
+    Genome-wide broad CNA frequency plot restricted to samples with
+    tf_low ≤ TF < tf_high (default 3 %–10 %, the near-LOD window).
+
+    The broad_tsv must already contain per-entity rows produced by
+    stream_broad_cna_frequencies run on the low-TF sample subset.
+    One panel per entity, gains upward, losses downward, y-axis capped
+    at ±60 %.  The subtitle carries the TF window so the plot is
+    self-documenting.
+
+    Parameters
+    ----------
+    broad_tsv   : path to the low-TF broad_cna_frequencies_lowtf.tsv
+    tf_tsv      : path to tf_summary.tsv  (used to count patients)
+    output_path : stem path for output (.pdf and .png added)
+    bin_size    : fixed bin width in bp for re-binning (default 5 Mbp)
+    min_freq    : bins below this frequency are not drawn (default 5 %)
+    tf_low      : lower TF bound (inclusive, default 0.03)
+    tf_high     : upper TF bound (exclusive, default 0.10)
+    entities    : restrict to these entities (None = all)
+    """
+    broad_df = pd.read_csv(broad_tsv, sep="\t", low_memory=False)
+    tf_df    = pd.read_csv(tf_tsv,    sep="\t", low_memory=False)
+
+    broad_df["chrom"] = broad_df["chrom"].astype(str).apply(
+        lambda c: c if c.startswith("chr") else f"chr{c}"
+    )
+    broad_df = broad_df[broad_df["chrom"].isin(_OFFSETS)]
+
+    # Restrict tf_df to the low-TF window to get accurate patient counts
+    tf_window = tf_df[
+        (tf_df["tumor_fraction"] >= tf_low) &
+        (tf_df["tumor_fraction"] <  tf_high)
+    ].copy()
+    tf_window["entity"] = tf_window["patient"].apply(
+        lambda p: entity_from_sample(str(p))
+    )
+
+    # One sample per patient (highest TF in window)
+    tf_window = (
+        tf_window.sort_values("tumor_fraction", ascending=False)
+                 .drop_duplicates(subset=["patient"], keep="first")
+    )
+
+    all_entities = sorted(
+        tf_window["entity"].unique().tolist(),
+        key=lambda e: list(ICHORCNA_ENTITY_PALETTE).index(e)
+        if e in ICHORCNA_ENTITY_PALETTE else 99,
+    )
+    if entities:
+        all_entities = [e for e in all_entities if e in entities]
+    if not all_entities:
+        print("      [WARN] No entities found in low-TF window — skipping low-TF broad CNA plot.")
+        return
+
+    n = len(all_entities)
+    fig = plt.figure(figsize=(22, 4.2 * n + 1.5), facecolor="white")
+    gs  = GridSpec(n, 1, figure=fig,
+                   hspace=0.55, top=0.90, bottom=0.06, left=0.07, right=0.96)
+
+    for ax_idx, entity in enumerate(all_entities):
+        ax  = fig.add_subplot(gs[ax_idx])
+        pal = ICHORCNA_ENTITY_PALETTE.get(entity, ICHORCNA_ENTITY_PALETTE["Other"])
+        _style_ax(ax)
+
+        n_patients = int(
+            (tf_window["entity"] == entity).sum()
+        )
+        if n_patients == 0:
+            continue
+
+        # Per-entity rows from the pre-filtered broad_tsv
+        if "entity" in broad_df.columns:
+            loci = broad_df[broad_df["entity"] == entity].copy()
+        else:
+            loci = broad_df.copy()
+
+        if loci.empty:
+            ax.set_title(
+                f"{entity}   (n = {n_patients} patients, "
+                f"TF {tf_low*100:.0f}–{tf_high*100:.0f}%) — no altered loci",
+                fontsize=11, fontweight="bold", color="#222222", pad=6, loc="left",
+            )
+            continue
+
+        for _, row in loci.iterrows():
+            chrom = row["chrom"]
+            x0    = _genome_x(chrom, int(row["bin_start"]))
+            width = int(row["bin_end"]) - int(row["bin_start"])
+            fa    = row["freq_amp"]
+            fd    = row["freq_del"]
+            if fa >= min_freq:
+                ax.bar(x0, fa, width=width, align="edge",
+                       color=pal["gain"], alpha=0.85, linewidth=0, zorder=2)
+            if fd >= min_freq:
+                ax.bar(x0, -fd, width=width, align="edge",
+                       color=pal["loss"], alpha=0.85, linewidth=0, zorder=2)
+
+        y_cap = 0.60
+        ax.set_ylim(-y_cap, y_cap)
+        ax.yaxis.set_major_formatter(mticker.PercentFormatter(xmax=1, decimals=0))
+        ax.set_ylabel("% patients", fontsize=8, color="#444444", labelpad=5)
+        ax.set_title(
+            f"{entity}   (n = {n_patients} patients, one sample per patient, "
+            f"TF {tf_low*100:.0f}–{tf_high*100:.0f}%)",
+            fontsize=11, fontweight="bold", color="#222222", pad=6, loc="left",
+        )
+        ax.text(GENOME_SIZE * 1.002,  y_cap * 0.5, "Gain",
+                fontsize=8, color=pal["gain"], va="center", ha="left", fontweight="bold")
+        ax.text(GENOME_SIZE * 1.002, -y_cap * 0.5, "Loss",
+                fontsize=8, color=pal["loss"], va="center", ha="left", fontweight="bold")
+
+    tf_range_str = f"TF {tf_low*100:.0f}%–{tf_high*100:.0f}%"
+    fig.suptitle(
+        f"Genome-Wide Copy-Number Frequencies — ichorCNA  ({tf_range_str})",
+        fontsize=14, fontweight="bold", color="#222222", y=0.98,
+    )
+    _save(fig, output_path)
+
+
 # ---------------------------------------------------------------------------
 # Focal amplification frequency plot
 # ---------------------------------------------------------------------------
@@ -455,7 +585,7 @@ def _per_entity_focal_freq(
 def plot_emergent_focal_amps(
         emergent_tsv: Path,
         output_path:  Path,
-        min_patients: int   = 2,
+        min_patients: int   = 1,
         top_n_labels: int   = 30,
         entities:     list[str] | None = None,
 ) -> None:
@@ -472,6 +602,7 @@ def plot_emergent_focal_amps(
     emergent_tsv  : path to emergent_focal_amps.tsv
     output_path   : stem path for output (.pdf and .png added)
     min_patients  : minimum number of patients for a locus to be plotted
+                    (default 1 = show all emergent events)
     top_n_labels  : max gene labels per panel
     entities      : restrict to these entities (None = all)
     """

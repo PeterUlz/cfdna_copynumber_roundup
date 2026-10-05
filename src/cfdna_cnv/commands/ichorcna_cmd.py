@@ -28,6 +28,7 @@ from ..ichorcna.longitudinal_plots import (
 )
 from ..ichorcna.plots import (
     plot_broad_cna_frequencies,
+    plot_broad_cna_frequencies_lowtf,
     plot_focal_amp_frequencies as plot_focal_amp_ichorcna,
     plot_emergent_focal_amps,
 )
@@ -278,6 +279,52 @@ def run(args: argparse.Namespace) -> None:
             print("      [WARN] No altered segments found in 1 Mbp run.")
     else:
         print("      [WARN] No 1 Mbp segment files for high-TF samples.")
+    gc.collect()
+
+    # ── 5b. Broad CNA frequencies — low-TF window (3 %–10 %) ────────────────
+    _lowtf_low  = getattr(args, "lowtf_min", 0.03)
+    _lowtf_high = getattr(args, "lowtf_max", 0.10)
+    print(f"\n[5b] Broad CNA frequencies — low-TF window "
+          f"({_lowtf_low*100:.0f}%–{_lowtf_high*100:.0f}%) …")
+
+    # Identify samples in the window (reads filter already applied to tf_df_filtered)
+    _lowtf_df = tf_df_filtered[
+        (tf_df_filtered["tumor_fraction"] >= _lowtf_low) &
+        (tf_df_filtered["tumor_fraction"] <  _lowtf_high)
+    ]
+    _lowtf_samples = _lowtf_df["sample"].tolist()
+    print(f"      {len(_lowtf_samples)} samples in TF window "
+          f"({_lowtf_low*100:.0f}%–{_lowtf_high*100:.0f}%).")
+
+    _seg_1mb_lowtf = {s: p for s, p in seg_1mb_files.items()
+                      if s in set(_lowtf_samples)}
+    if _seg_1mb_lowtf:
+        _sample_entity_lowtf = {
+            row["sample"]: entity_from_sample(str(row["patient"]))
+            for _, row in tf_df_filtered.iterrows()
+        }
+        _broad_lowtf = stream_broad_cna_frequencies(
+            _seg_1mb_lowtf, _lowtf_samples,
+            sample_entity = _sample_entity_lowtf,
+            tf_df         = _lowtf_df,
+            min_abs_log2r = getattr(args, "log2_delta", 0.2),
+        )
+        if not _broad_lowtf.empty:
+            _broad_lowtf_out = outdir / "broad_cna_frequencies_lowtf.tsv"
+            _broad_lowtf.to_csv(_broad_lowtf_out, sep="\t", index=False)
+            print(f"      Written: {_broad_lowtf_out}  ({len(_broad_lowtf)} loci)")
+            plot_broad_cna_frequencies_lowtf(
+                broad_tsv   = _broad_lowtf_out,
+                tf_tsv      = tf_out,
+                output_path = outdir / "broad_cna_frequencies_lowtf_plot",
+                bin_size    = getattr(args, "plot_bin_size", 5_000_000),
+                tf_low      = _lowtf_low,
+                tf_high     = _lowtf_high,
+            )
+        else:
+            print("      [WARN] No altered segments found in low-TF window.")
+    else:
+        print("      [WARN] No 1 Mbp segment files found for low-TF window.")
     gc.collect()
 
     # ── 6. Focal amplifications ──────────────────────────────────────────────
@@ -646,43 +693,3 @@ def run(args: argparse.Namespace) -> None:
 
     print(f"\nAll results written to: {outdir.resolve()}")
     print("=" * 70)
-
-    # ── Sigminer CN signatures ────────────────────────────────────────────
-    if getattr(args, "sigminer", False):
-        from ..sigminer import run_sigminer
-        sig_dir = outdir / "sigminer"
-        print(f"\n[Sigminer] CN signature analysis → {sig_dir}")
-        _sig_refs = getattr(args, "sigminer_ref", ["CNS_TCGA", "CNS_PCAWG176"])
-        if isinstance(_sig_refs, str):
-            _sig_refs = [_sig_refs]
-        run_sigminer(
-            tf_df       = tf_df,
-            seg_files   = seg_1mb_files,
-            output_dir  = sig_dir,
-            ref_sets    = _sig_refs,
-            min_tf      = getattr(args, "sigminer_min_tf", 0.15),
-            genome      = getattr(args, "sigminer_genome", "hg38"),
-            cores       = getattr(args, "sigminer_cores", 1),
-            n_sig_max   = getattr(args, "sigminer_n_sig", 6),
-            rscript_bin = getattr(args, "rscript", "Rscript"),
-            run_r       = not getattr(args, "sigminer_no_run", False),
-        )
-
-    # ── LiquidCNA ──────────────────────────────────────────────────────────
-    if getattr(args, "liquidcna", False):
-        from ..liquidcna import run_liquidcna
-        lcna_dir       = outdir / "liquidcna"
-        functions_path = Path(args.liquidcna_functions) \
-                         if getattr(args, "liquidcna_functions", None) \
-                         else Path("mixture_estimation_functions.R")
-        print(f"\n[LiquidCNA] Subclonal evolution analysis → {lcna_dir}")
-        run_liquidcna(
-            tf_df          = tf_df,
-            seg_files_1mb  = seg_1mb_files,
-            output_dir     = lcna_dir,
-            functions_path = functions_path,
-            min_tf         = getattr(args, "liquidcna_min_tf", 0.20),
-            min_timepoints = getattr(args, "liquidcna_min_timepoints", 2),
-            rscript_bin    = getattr(args, "rscript", "Rscript"),
-            run_r          = not getattr(args, "liquidcna_no_run", False),
-        )
