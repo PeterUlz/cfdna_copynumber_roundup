@@ -326,7 +326,7 @@ def plot_broad_cna_frequencies_lowtf(
                 ax.bar(x0, -fd, width=width, align="edge",
                        color=pal["loss"], alpha=0.85, linewidth=0, zorder=2)
 
-        y_cap = 0.60
+        y_cap = 0.80
         ax.set_ylim(-y_cap, y_cap)
         ax.yaxis.set_major_formatter(mticker.PercentFormatter(xmax=1, decimals=0))
         ax.set_ylabel("% patients", fontsize=8, color="#444444", labelpad=5)
