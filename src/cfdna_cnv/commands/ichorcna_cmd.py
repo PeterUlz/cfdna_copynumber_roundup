@@ -32,7 +32,8 @@ from ..ichorcna.plots import (
     plot_focal_amp_frequencies as plot_focal_amp_ichorcna,
     plot_emergent_focal_amps,
 )
-from ..ichorcna.broad_cna import stream_broad_cna_frequencies
+from ..ichorcna.broad_cna import (stream_broad_cna_frequencies,
+                                   stream_broad_cna_frequencies_cn_only)
 from ..ichorcna.focal_amp import (
     stream_focal_amplifications,
     aggregate_focal_frequencies,
@@ -303,11 +304,10 @@ def run(args: argparse.Namespace) -> None:
             row["sample"]: entity_from_sample(str(row["patient"]))
             for _, row in tf_df_filtered.iterrows()
         }
-        _broad_lowtf = stream_broad_cna_frequencies(
+        _broad_lowtf = stream_broad_cna_frequencies_cn_only(
             _seg_1mb_lowtf, _lowtf_samples,
             sample_entity = _sample_entity_lowtf,
             tf_df         = _lowtf_df,
-            min_abs_log2r = getattr(args, "log2_delta", 0.2),
         )
         if not _broad_lowtf.empty:
             _broad_lowtf_out = outdir / "broad_cna_frequencies_lowtf.tsv"
