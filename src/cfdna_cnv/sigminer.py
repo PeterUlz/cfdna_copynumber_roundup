@@ -31,10 +31,10 @@ Pipeline
 
 Usage (CLI)
 -----------
-    cfdna-cnv ichorcna ... --sigminer
-    cfdna-cnv ichorcna ... --sigminer --sigminer-ref CNS_TCGA CNS_PCAWG176
-    cfdna-cnv ichorcna ... --sigminer --sigminer-min-tf 0.20
-    cfdna-cnv ichorcna ... --sigminer --sigminer-no-run
+    cfdna-cnv locate ... --sigminer
+    cfdna-cnv locate ... --sigminer --sigminer-ref CNS_TCGA CNS_PCAWG176
+    cfdna-cnv locate ... --sigminer --sigminer-min-tf 0.20
+    cfdna-cnv locate ... --sigminer --sigminer-no-run
 """
 from __future__ import annotations
 

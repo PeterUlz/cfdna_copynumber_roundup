@@ -19,7 +19,7 @@ Pipeline
 
 Usage (CLI)
 -----------
-    cfdna-cnv ichorcna ... --liquidcna --liquidcna-functions /path/to/mixture_estimation_functions.R
+    cfdna-cnv locate ... --liquidcna --liquidcna-functions /path/to/mixture_estimation_functions.R
 """
 from __future__ import annotations
 

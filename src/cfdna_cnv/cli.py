@@ -2,7 +2,7 @@
 cfdna-cnv  —  cfDNA copy-number analysis toolkit
 
 Full pipeline:
-    ichorcna   Analyze ichorCNA output (broad CNA + focal amps + longitudinal)
+    locate   Analyze ichorCNA output (broad CNA + focal amps + longitudinal)
     cbio       Analyze cBioPortal segmentation files (broad CNA + focal amps)
 
 Focused commands (ichorCNA data):
@@ -73,7 +73,7 @@ def _add_focal_amp_args(p: argparse.ArgumentParser) -> None:
 
 
 # ---------------------------------------------------------------------------
-# ichorcna — full pipeline (unchanged)
+# locate — full pipeline (unchanged)
 # ---------------------------------------------------------------------------
 
 def _build_locate_parser(sub: argparse._SubParsersAction) -> None:

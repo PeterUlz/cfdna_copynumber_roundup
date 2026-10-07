@@ -2,7 +2,7 @@
 Genome-wide CNA and focal amplification frequency plots for cBioPortal data.
 
 Note: focal amplification frequency plots for cBioPortal data use the same
-function as ichorCNA data — plot_focal_amp_frequencies from ichorcna/plots.py
+function as ichorCNA data — plot_focal_amp_frequencies from locate/plots.py
 — so the colour scheme and bar-style rendering are identical across both
 data sources.  The old lollipop-style plot previously defined here has been
 removed.
