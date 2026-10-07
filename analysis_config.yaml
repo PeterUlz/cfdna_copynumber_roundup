@@ -27,7 +27,7 @@ log2:
 # ── Focal amplification detection ───────────────────────────────────────────
 focal:
   min-bp:               150000   # Minimum segment size (50 kbp)
-  max-bp:               500000  # Maximum segment size (500 kbp)
+  max-bp:               15000000  # Maximum segment size (15 Mbp)
   min-bins:             3       # Minimum 50 kbp bins in segment (≥ 150 kbp)
   flank-bins:           2       # Background window: 2 × 1 Mbp on each side
   noise-factor:         2.0     # Segment logR must be ≥ noise_factor × noise
