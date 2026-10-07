@@ -36,7 +36,7 @@ import pandas as pd
 from ..common.constants import CHROM_ORDER, CHROM_LENGTHS, GENOME_SIZE, _OFFSETS
 from ..common.io import parse_seg_file
 from .plots import (
-    ICHORCNA_ENTITY_PALETTE, entity_from_sample,
+    LOCATE_ENTITY_PALETTE, entity_from_sample,
     _style_ax, _genome_x, _save,
 )
 
@@ -469,7 +469,7 @@ def plot_pairwise_longitudinal(
     logr_ylim          : y-axis range
     focal_tsv          : path to focal_amplifications.tsv for shading
     """
-    pal     = ICHORCNA_ENTITY_PALETTE.get(entity, ICHORCNA_ENTITY_PALETTE["Other"])
+    pal     = LOCATE_ENTITY_PALETTE.get(entity, LOCATE_ENTITY_PALETTE["Other"])
     color_a = "#888888"
     color_b = pal["gain"]
 
@@ -801,7 +801,7 @@ def plot_longitudinal_combined(
             a fixed gain/loss colour scheme (CLEAN_PALETTE) shared across
             all entities — suitable for compiling into figures.
     """
-    pal     = ICHORCNA_ENTITY_PALETTE.get(entity, ICHORCNA_ENTITY_PALETTE["Other"])
+    pal     = LOCATE_ENTITY_PALETTE.get(entity, LOCATE_ENTITY_PALETTE["Other"])
     color_a = "#888888"
     color_b = pal["gain"]
 
@@ -1527,7 +1527,7 @@ def plot_differential_longitudinal(
     Uses segment means from .seg.txt for the scaling optimisation and
     raw bin logR from .cna.seg for the differential scatter display.
     """
-    pal = ICHORCNA_ENTITY_PALETTE.get(entity, ICHORCNA_ENTITY_PALETTE["Other"])
+    pal = LOCATE_ENTITY_PALETTE.get(entity, LOCATE_ENTITY_PALETTE["Other"])
 
     bins_a = _load_bins(seg_path_a, sample_a, tf_from=tf_a)
     bins_b = _load_bins(seg_path_b, sample_b, tf_from=tf_b)
@@ -3445,7 +3445,7 @@ def compute_scaled_tf_estimates(
         Scatter: ichorCNA TF (x) vs estimated TF (y) coloured by entity,
         with identity line y=x.
     """
-    from .plots import _save as _plots_save, ICHORCNA_ENTITY_PALETTE, entity_from_sample
+    from .plots import _save as _plots_save, LOCATE_ENTITY_PALETTE, entity_from_sample
 
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -3564,7 +3564,7 @@ def compute_scaled_tf_estimates(
             linestyle="--", zorder=1, label="y = x (perfect agreement)")
 
     for entity, grp in non_ref.groupby("entity"):
-        pal   = ICHORCNA_ENTITY_PALETTE.get(entity, ICHORCNA_ENTITY_PALETTE["Other"])
+        pal   = LOCATE_ENTITY_PALETTE.get(entity, LOCATE_ENTITY_PALETTE["Other"])
         color = pal["gain"]
         # Error bars from tf_lower / tf_upper
         yerr_lo = (grp["tf_estimated"] - grp["tf_lower"]).clip(lower=0).values

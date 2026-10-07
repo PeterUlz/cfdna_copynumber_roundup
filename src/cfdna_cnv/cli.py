@@ -25,7 +25,7 @@ def _add_cosmic_arg(p: argparse.ArgumentParser) -> None:
     )
 
 
-def _add_common_ichorcna_args(p: argparse.ArgumentParser) -> None:
+def _add_common_locate_args(p: argparse.ArgumentParser) -> None:
     """Args shared by all ichorCNA-based subcommands."""
     p.add_argument("--config", default=None, metavar="FILE",
                    help="YAML config file. CLI arguments override config values.")
@@ -76,18 +76,18 @@ def _add_focal_amp_args(p: argparse.ArgumentParser) -> None:
 # ichorcna — full pipeline (unchanged)
 # ---------------------------------------------------------------------------
 
-def _build_ichorcna_parser(sub: argparse._SubParsersAction) -> None:
+def _build_locate_parser(sub: argparse._SubParsersAction) -> None:
     p = sub.add_parser(
-        "ichorcna",
-        help="Full ichorCNA analysis pipeline (broad CNA + focal amps + longitudinal).",
+        "locate",
+        help="Full LOCATE analysis pipeline (broad CNA + focal amps + longitudinal).",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    _add_common_ichorcna_args(p)
+    _add_common_locate_args(p)
     p.add_argument("--dir-1mb",  default=None,
                    help="Directory containing ichorCNA 1 Mbp run output.")
     p.add_argument("--dir-50kb", default=None,
                    help="Directory containing ichorCNA 50 kbp run output.")
-    p.add_argument("--output", default="ichorcna_results",
+    p.add_argument("--output", default="locate_results",
                    help="Output directory.")
     _add_focal_amp_args(p)
     p.add_argument("--skip-validation", action="store_true",
@@ -112,7 +112,7 @@ def _build_ichorcna_parser(sub: argparse._SubParsersAction) -> None:
                    help="Min |delta log2R| for emergent CNA (default 0.5).")
     p.add_argument("--no-clean-plots", action="store_true",
                    help="Disable clean publication-style longitudinal plots.")
-    p.set_defaults(func=_run_ichorcna)
+    p.set_defaults(func=_run_locate)
 
 
 # ---------------------------------------------------------------------------
@@ -135,7 +135,7 @@ Examples:
   cfdna-cnv focal-amps --config analysis.yaml
 """,
     )
-    _add_common_ichorcna_args(p)
+    _add_common_locate_args(p)
     p.add_argument("--dir-1mb",  default=None,
                    help="Directory containing ichorCNA 1 Mbp run output.")
     p.add_argument("--dir-50kb", default=None,
@@ -161,7 +161,7 @@ def _run_focal_amps(args: argparse.Namespace) -> None:
     args.emergent_min_bins     = 3
     args.emergent_min_delta    = 0.5
     args.no_clean_plots        = True
-    from .commands.ichorcna_cmd import run
+    from .commands.locate_cmd import run
     run(args)
 
 
@@ -187,7 +187,7 @@ Examples:
       --all-pairs --output longitudinal_results
 """,
     )
-    _add_common_ichorcna_args(p)
+    _add_common_locate_args(p)
     p.add_argument("--dir-1mb",  default=None,
                    help="Directory containing ichorCNA 1 Mbp run output.")
     p.add_argument("--dir-50kb", default=None,
@@ -220,7 +220,7 @@ def _run_compare(args: argparse.Namespace) -> None:
     """Delegate to ichorcna_cmd.run with longitudinal plots enabled."""
     args.longitudinal_plots    = True
     args.longitudinal_plot_dir = getattr(args, "longitudinal_plot_dir", None)
-    from .commands.ichorcna_cmd import run
+    from .commands.locate_cmd import run
     run(args)
 
 
@@ -330,7 +330,7 @@ def _run_compare_samples(args: argparse.Namespace) -> None:
 
     from .common.io import find_sample_files, normalize_sample_name
     from .common.cosmic import load_cosmic_cgc, annotate_with_cgc
-    from .ichorcna.longitudinal_plots import plot_longitudinal_combined
+    from .locate.longitudinal_plots import plot_longitudinal_combined
 
     outdir = _Path(args.output)
     outdir.mkdir(parents=True, exist_ok=True)
@@ -507,7 +507,7 @@ Examples:
       --traj-min-tf 0.07 --traj-min-reads 500000
 """,
     )
-    _add_common_ichorcna_args(p)
+    _add_common_locate_args(p)
     p.add_argument("--dir-1mb",  default=None,
                    help="Directory containing ichorCNA 1 Mbp run output.")
     p.add_argument("--dir-50kb", default=None,
@@ -547,7 +547,7 @@ def _run_trajectories(args: argparse.Namespace) -> None:
     args.no_clean_plots        = False
     # traj-specific args get picked up directly by plot_all_focal_amp_trajectories
     # via the ichorcna_cmd run function
-    from .commands.ichorcna_cmd import run
+    from .commands.locate_cmd import run
     run(args)
 
 
@@ -655,7 +655,7 @@ Examples:
       --output gene_trajectories
 """,
     )
-    _add_common_ichorcna_args(p)
+    _add_common_locate_args(p)
     p.add_argument("--dir-50kb", default=None,
                    help="Directory containing ichorCNA 50 kbp run output.")
     p.add_argument("--dir-1mb",  default=None,
@@ -717,7 +717,7 @@ def _run_gene_trajectories(args: argparse.Namespace) -> None:
     import pandas as pd
 
     from .common.io import find_sample_files, collect_tumor_fractions
-    from .ichorcna.longitudinal_plots import plot_gene_focal_trajectories
+    from .locate.longitudinal_plots import plot_gene_focal_trajectories
 
     outdir = _Path(args.output)
     outdir.mkdir(parents=True, exist_ok=True)
@@ -858,8 +858,8 @@ def _build_cbio_parser(sub: argparse._SubParsersAction) -> None:
     p.set_defaults(func=_run_cbio)
 
 
-def _run_ichorcna(args: argparse.Namespace) -> None:
-    from .commands.ichorcna_cmd import run
+def _run_locate(args: argparse.Namespace) -> None:
+    from .commands.locate_cmd import run
     run(args)
 
 
@@ -880,7 +880,7 @@ def main() -> None:
     )
     sub = parser.add_subparsers(dest="command", metavar="SUBCOMMAND")
     sub.required = True
-    _build_ichorcna_parser(sub)
+    _build_locate_parser(sub)
     _build_cbio_parser(sub)
     _build_focal_amps_parser(sub)
     _build_compare_parser(sub)
@@ -894,7 +894,7 @@ def main() -> None:
     # ── --write-config: dump default and exit ────────────────────────────
     if getattr(args, "write_config", None):
         from .config import write_default_config
-        cmd = args.command if args.command in ("ichorcna", "cbio") else "ichorcna"
+        cmd = args.command if args.command in ("locate", "cbio") else "locate"
         write_default_config(Path(args.write_config), cmd)
         sys.exit(0)
 
@@ -906,8 +906,8 @@ def main() -> None:
         args       = apply_config_to_namespace(args, cfg, sub_parser)
 
     # ── Validate required inputs after config merge ──────────────────────
-    _NEEDS_1MB  = {"ichorcna", "focal-amps", "compare", "trajectories"}
-    _NEEDS_50KB = {"ichorcna", "focal-amps", "compare", "trajectories",
+    _NEEDS_1MB  = {"locate", "focal-amps", "compare", "trajectories"}
+    _NEEDS_50KB = {"locate", "focal-amps", "compare", "trajectories",
                    "compare-samples", "gene-trajectories"}
     missing = []
     if args.command in _NEEDS_1MB  and not getattr(args, "dir_1mb",  None):

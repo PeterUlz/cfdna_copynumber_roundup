@@ -5,9 +5,9 @@ Config files are YAML and map directly to CLI argument names.
 CLI arguments always override config file values.
 
 Usage:
-    cfdna-cnv ichorcna --config analysis.yaml
-    cfdna-cnv ichorcna --config analysis.yaml --tf-threshold 0.05  # override one
-    cfdna-cnv ichorcna --write-config analysis.yaml                 # dump defaults
+    cfdna-cnv locate --config analysis.yaml
+    cfdna-cnv locate --config analysis.yaml --tf-threshold 0.05  # override one
+    cfdna-cnv locate --write-config analysis.yaml                 # dump defaults
 """
 from __future__ import annotations
 
@@ -93,10 +93,10 @@ def apply_config_to_namespace(
     return args
 
 
-def write_default_config(path: Path, subcommand: str = "ichorcna") -> None:
+def write_default_config(path: Path, subcommand: str = "locate") -> None:
     """Write a well-commented default config file for the given subcommand."""
-    if subcommand == "ichorcna":
-        content = _ICHORCNA_DEFAULT_CONFIG
+    if subcommand == "locate":
+        content = _LOCATE_DEFAULT_CONFIG
     elif subcommand == "cbio":
         content = _CBIO_DEFAULT_CONFIG
     else:
@@ -109,19 +109,19 @@ def write_default_config(path: Path, subcommand: str = "ichorcna") -> None:
 # Default configs
 # ---------------------------------------------------------------------------
 
-_ICHORCNA_DEFAULT_CONFIG = """\
-# cfdna-cnv ichorcna configuration
+_LOCATE_DEFAULT_CONFIG = """\
+# cfdna-cnv locate configuration
 # =================================
-# Generate this file with:  cfdna-cnv ichorcna --write-config analysis.yaml
-# Run with:                 cfdna-cnv ichorcna --config analysis.yaml
+# Generate this file with:  cfdna-cnv locate --write-config analysis.yaml
+# Run with:                 cfdna-cnv locate --config analysis.yaml
 #
 # CLI arguments always override values here, e.g.:
-#   cfdna-cnv ichorcna --config analysis.yaml --tf-threshold 0.05
+#   cfdna-cnv locate --config analysis.yaml --tf-threshold 0.05
 
 # ── Input / output ──────────────────────────────────────────────────────────
 dir-1mb:  /path/to/ichorCNA_1Mbp_output    # required
 dir-50kb: /path/to/ichorCNA_50kbp_output   # required
-output:   ichorcna_results
+output:   locate_results
 
 # ── Sample filtering ─────────────────────────────────────────────────────────
 tf:

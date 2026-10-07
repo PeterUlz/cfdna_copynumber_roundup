@@ -15,10 +15,10 @@ import pandas as pd
 from ..common.cosmic import load_cosmic_cgc
 from ..common.io import (find_sample_files, collect_tumor_fractions,
                           parse_wig_total_reads, filter_seg_files_by_tf_df)
-from ..ichorcna.qc import find_incomplete_runs, validate_all_seg_files
-from ..ichorcna.longitudinal import emergent_focal_amps
-from ..ichorcna.focal_amp_plots import plot_all_focal_amp_diagnostics
-from ..ichorcna.longitudinal_plots import (
+from ..locate.qc import find_incomplete_runs, validate_all_seg_files
+from ..locate.longitudinal import emergent_focal_amps
+from ..locate.focal_amp_plots import plot_all_focal_amp_diagnostics
+from ..locate.longitudinal_plots import (
     plot_all_pairwise_longitudinal,
     plot_longitudinal_combined,
     plot_all_focal_amp_trajectories,
@@ -26,19 +26,19 @@ from ..ichorcna.longitudinal_plots import (
     plot_focal_amp_cohort_stability,
     plot_focal_amp_stability_focused,
 )
-from ..ichorcna.plots import (
+from ..locate.plots import (
     plot_broad_cna_frequencies,
     plot_broad_cna_frequencies_lowtf,
     plot_focal_amp_frequencies as plot_focal_amp_ichorcna,
     plot_emergent_focal_amps,
 )
-from ..ichorcna.broad_cna import (stream_broad_cna_frequencies,
+from ..locate.broad_cna import (stream_broad_cna_frequencies,
                                    stream_broad_cna_frequencies_cn_only)
-from ..ichorcna.focal_amp import (
+from ..locate.focal_amp import (
     stream_focal_amplifications,
     aggregate_focal_frequencies,
 )
-from ..ichorcna.plots import entity_from_sample
+from ..locate.plots import entity_from_sample
 
 
 def _safe_read(p: Path, **kwargs) -> pd.DataFrame | None:
@@ -254,7 +254,7 @@ def run(args: argparse.Namespace) -> None:
     print(f"      Processing {len(seg_1mb_hightf)} high-TF samples …")
     if seg_1mb_hightf:
         # Build sample→entity map from tf_df so broad CNA counts are per entity
-        from ..ichorcna.plots import ENTITY_MAP
+        from ..locate.plots import ENTITY_MAP
         _sample_entity = {
             row["sample"]: entity_from_sample(str(row["patient"]))
             for _, row in tf_df.iterrows()
@@ -336,7 +336,7 @@ def run(args: argparse.Namespace) -> None:
     if not seg_50k_hightf:
         print("      [WARN] No 50 kbp segment files for high-TF samples.")
     else:
-        tmp_dir  = Path(tempfile.mkdtemp(prefix="ichorcna_tmp_"))
+        tmp_dir  = Path(tempfile.mkdtemp(prefix="locate_tmp_"))
         focal_tmp = stream_focal_amplifications(
             seg_files_50k        = seg_50k_hightf,
             high_tf_samples      = high_tf_samples,
@@ -453,7 +453,7 @@ def run(args: argparse.Namespace) -> None:
 
     longit = pd.DataFrame()
     try:
-        from ..ichorcna.longitudinal import longitudinal_comparison
+        from ..locate.longitudinal import longitudinal_comparison
         longit = longitudinal_comparison(focal_for_longit, tf_df)
     except ImportError:
         pass

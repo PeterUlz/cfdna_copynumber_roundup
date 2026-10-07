@@ -19,12 +19,12 @@ import matplotlib.ticker as mticker
 import numpy as np
 import pandas as pd
 
-from .ichorcna.longitudinal_plots import (
+from .locate.longitudinal_plots import (
     _load_bins_with_seg_means,
     _align_bins,
     _optimise_scaling,
 )
-from .ichorcna.plots import _save, ICHORCNA_ENTITY_PALETTE
+from .locate.plots import _save, LOCATE_ENTITY_PALETTE
 
 
 def load_dilution_metadata(tsv: Path) -> pd.DataFrame:

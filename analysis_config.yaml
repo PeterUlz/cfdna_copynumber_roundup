@@ -1,15 +1,15 @@
-# cfdna-cnv ichorcna configuration
+# cfdna-cnv locate configuration
 # =================================
-# Generate this file with:  cfdna-cnv ichorcna --write-config analysis.yaml
-# Run with:                 cfdna-cnv ichorcna --config analysis.yaml
+# Generate this file with:  cfdna-cnv locate --write-config analysis.yaml
+# Run with:                 cfdna-cnv locate --config analysis.yaml
 #
 # CLI arguments always override values here, e.g.:
-#   cfdna-cnv ichorcna --config analysis.yaml --tf-threshold 0.05
+#   cfdna-cnv locate --config analysis.yaml --tf-threshold 0.05
 
 # ── Input / output ──────────────────────────────────────────────────────────
-dir-1mb:  ./output_1Mbp    # required
-dir-50kb: ./output   # required
-output:   ichorcna_results
+dir-1mb:  /path/to/ichorCNA_1Mbp_output    # required
+dir-50kb: /path/to/ichorCNA_50kbp_output   # required
+output:   locate_results
 
 # ── Sample filtering ─────────────────────────────────────────────────────────
 tf:
@@ -26,44 +26,30 @@ log2:
 
 # ── Focal amplification detection ───────────────────────────────────────────
 focal:
-  min-bp:               150000   # Minimum segment size (150 kbp)
-  max-bp:               15000000  # Maximum segment size (15 Mbp)
+  min-bp:               50000   # Minimum segment size (50 kbp)
+  max-bp:               500000  # Maximum segment size (500 kbp)
   min-bins:             3       # Minimum 50 kbp bins in segment (≥ 150 kbp)
-  flank-bins:           20       # Background window: 2 × 1 Mbp on each side
+  flank-bins:           2       # Background window: 2 × 1 Mbp on each side
   noise-factor:         2.0     # Segment logR must be ≥ noise_factor × noise
-  max-focal-per-sample: 50       # Discard samples with > N focal amps
+  max-focal-per-sample: 5       # Discard samples with > N focal amps
   freq-min-freq:        0.0     # Min patient frequency for frequency plot
-  amp-diagnostics:      false #true   # Generate per-sample diagnostic plots
+  amp-diagnostics:      false   # Generate per-sample diagnostic plots
 
 # ── Broad CNA plot ───────────────────────────────────────────────────────────
 plot:
-  bin-size: 1000000       # Genomic bin size for broad CNA frequency plot (1 Mbp)
+  bin-size: 5000000       # Genomic bin size for broad CNA frequency plot (5 Mbp)
 
 # ── COSMIC annotation ────────────────────────────────────────────────────────
-cosmic-cgc: ref/Census_allFri_Sep_6_09_26_04_2024.tsv
-
-# ──  LiquidCNA  ───────────────────────────────────────────────────────
-liquidcna: false
-liquidcna-functions: ./mixture_estimation_functions.R
-liquidcna-min-tf: 0.2
-liquidcna-min-timepoints: 2
-
-# ── Sigminer CN signatures ───────────────────────────────────────────────────
-sigminer: true                   # Set to true to enable
-sigminer-ref: [CNS_TCGA]
-sigminer-n-sig: 6
-sigminer-min-tf:      0.15        # Min TF for samples (15%)
-sigminer-genome:      hg38        # hg38 or hg19
-sigminer-cores:       1           # Parallel cores
-sigminer-no-run:      false       # Prepare R script but don't execute
+# cosmic-cgc: /path/to/Census_allThu.tsv
 
 # ── Longitudinal plots ───────────────────────────────────────────────────────
 longitudinal:
-  plots:                true # true    # Enable longitudinal comparison plots
+  plots:                true    # Enable longitudinal comparison plots
   # plot-dir: null              # Output dir (default: <output>/longitudinal_plots)
-  max-noise:            0.35    # Max neighbour noise; noisier pairs are skipped
+  max-noise:            0.15    # Max neighbour noise; noisier pairs are skipped
   min-signal:           null    # Min SNR (p95/noise); null = disabled
-  min-altered-fraction: 0.01    # Min fraction of bins with |logR| > 0.2
+  min-altered-fraction: 0.05    # Min fraction of bins with |logR| > 0.2
   plot-raw:             false   # Also output unsmoothed plots
   emergent-min-bins:    3       # Min consecutive bins to call emergent CNA
   emergent-min-delta:   0.5     # Min |delta log2R| per bin for emergent CNA
+  no-clean-plots:       false   # Set true to skip 'clean' figure-ready plots

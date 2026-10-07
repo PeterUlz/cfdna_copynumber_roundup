@@ -35,7 +35,7 @@ from ..common.constants import (
 # Entity definitions
 # ---------------------------------------------------------------------------
 
-ICHORCNA_ENTITY_PALETTE: dict[str, dict] = {
+LOCATE_ENTITY_PALETTE: dict[str, dict] = {
     "Breast":     {"gain": "#e63946", "loss": "#457b9d"},
     "Colorectal": {"gain": "#2a9d8f", "loss": "#e9c46a"},
     "Prostate":   {"gain": "#f4a261", "loss": "#264653"},
@@ -143,8 +143,8 @@ def plot_broad_cna_frequencies(
 
     all_entities = sorted(
         [e for e in entity_n if entity_n[e] > 0 and e != "All"],
-        key=lambda e: list(ICHORCNA_ENTITY_PALETTE).index(e)
-        if e in ICHORCNA_ENTITY_PALETTE else 99,
+        key=lambda e: list(LOCATE_ENTITY_PALETTE).index(e)
+        if e in LOCATE_ENTITY_PALETTE else 99,
     )
     if entities:
         all_entities = [e for e in all_entities if e in entities]
@@ -159,7 +159,7 @@ def plot_broad_cna_frequencies(
 
     for ax_idx, entity in enumerate(all_entities):
         ax  = fig.add_subplot(gs[ax_idx])
-        pal = ICHORCNA_ENTITY_PALETTE.get(entity, ICHORCNA_ENTITY_PALETTE["Other"])
+        pal = LOCATE_ENTITY_PALETTE.get(entity, LOCATE_ENTITY_PALETTE["Other"])
         _style_ax(ax)
 
         n_entity   = entity_n.get(entity, 0)
@@ -274,8 +274,8 @@ def plot_broad_cna_frequencies_lowtf(
 
     all_entities = sorted(
         tf_window["entity"].unique().tolist(),
-        key=lambda e: list(ICHORCNA_ENTITY_PALETTE).index(e)
-        if e in ICHORCNA_ENTITY_PALETTE else 99,
+        key=lambda e: list(LOCATE_ENTITY_PALETTE).index(e)
+        if e in LOCATE_ENTITY_PALETTE else 99,
     )
     if entities:
         all_entities = [e for e in all_entities if e in entities]
@@ -290,7 +290,7 @@ def plot_broad_cna_frequencies_lowtf(
 
     for ax_idx, entity in enumerate(all_entities):
         ax  = fig.add_subplot(gs[ax_idx])
-        pal = ICHORCNA_ENTITY_PALETTE.get(entity, ICHORCNA_ENTITY_PALETTE["Other"])
+        pal = LOCATE_ENTITY_PALETTE.get(entity, LOCATE_ENTITY_PALETTE["Other"])
         _style_ax(ax)
 
         n_patients = int(
@@ -410,8 +410,8 @@ def plot_focal_amp_frequencies(
 
     all_entities = sorted(
         [e for e in entity_patients_map if entity_patients_map[e]],
-        key=lambda e: list(ICHORCNA_ENTITY_PALETTE).index(e)
-        if e in ICHORCNA_ENTITY_PALETTE else 99,
+        key=lambda e: list(LOCATE_ENTITY_PALETTE).index(e)
+        if e in LOCATE_ENTITY_PALETTE else 99,
     )
     if entities:
         all_entities = [e for e in all_entities if e in entities]
@@ -440,7 +440,7 @@ def plot_focal_amp_frequencies(
 
     for ax_idx, entity in enumerate(all_entities):
         ax  = fig.add_subplot(gs[ax_idx])
-        pal = ICHORCNA_ENTITY_PALETTE.get(entity, ICHORCNA_ENTITY_PALETTE["Other"])
+        pal = LOCATE_ENTITY_PALETTE.get(entity, LOCATE_ENTITY_PALETTE["Other"])
         _style_ax(ax)
 
         ent_patients = entity_patients_map.get(entity, set())
@@ -617,8 +617,8 @@ def plot_emergent_focal_amps(
 
     all_entities = sorted(
         [e for e in df["entity"].unique() if pd.notna(e)],
-        key=lambda e: list(ICHORCNA_ENTITY_PALETTE).index(e)
-        if e in ICHORCNA_ENTITY_PALETTE else 99,
+        key=lambda e: list(LOCATE_ENTITY_PALETTE).index(e)
+        if e in LOCATE_ENTITY_PALETTE else 99,
     )
     if entities:
         all_entities = [e for e in all_entities if e in entities]
@@ -633,7 +633,7 @@ def plot_emergent_focal_amps(
 
     for ax_idx, entity in enumerate(all_entities):
         ax   = fig.add_subplot(gs[ax_idx])
-        pal  = ICHORCNA_ENTITY_PALETTE.get(entity, ICHORCNA_ENTITY_PALETTE["Other"])
+        pal  = LOCATE_ENTITY_PALETTE.get(entity, LOCATE_ENTITY_PALETTE["Other"])
         _style_ax(ax)
 
         ent_df = df[df["entity"] == entity]

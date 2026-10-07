@@ -17,8 +17,8 @@ from ..cbio.frequencies import (
     detect_focal_amps_cbio,
 )
 from ..cbio.plots import plot_cna_frequencies
-from ..ichorcna.focal_amp import aggregate_focal_frequencies
-from ..ichorcna.plots import plot_focal_amp_frequencies as plot_focal_amp_ichorcna
+from ..locate.focal_amp import aggregate_focal_frequencies
+from ..locate.plots import plot_focal_amp_frequencies as plot_focal_amp_locate
 
 
 def _parse_paths(raw: str) -> list[Path]:
@@ -233,7 +233,7 @@ def run(args: argparse.Namespace) -> None:
         tf_tsv_plot = outdir / 'cbio_tf_summary_plot.tsv'
         cbio_tf_df_plot.to_csv(tf_tsv_plot, sep='\t', index=False)
 
-        plot_focal_amp_ichorcna(
+        plot_focal_amp_locate(
             focal_freq_tsv = freq_out,
             tf_tsv         = tf_tsv_plot,
             output_path    = outdir / 'focal_amp_frequencies_plot',

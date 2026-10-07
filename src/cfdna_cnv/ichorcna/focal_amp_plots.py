@@ -34,7 +34,7 @@ import pandas as pd
 from ..common.constants import CHROM_ORDER, CHROM_LENGTHS, GENOME_SIZE, _OFFSETS
 from ..common.io import parse_seg_file
 from .plots import (
-    ICHORCNA_ENTITY_PALETTE, entity_from_sample,
+    LOCATE_ENTITY_PALETTE, entity_from_sample,
     _style_ax, _genome_x, _save,
 )
 from .focal_amp import (

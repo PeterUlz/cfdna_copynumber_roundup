@@ -390,7 +390,7 @@ def aggregate_focal_frequencies(
         return pd.DataFrame()
 
     from ..common.constants import CHROM_ORDER
-    from ..ichorcna.plots import entity_from_sample
+    from ..locate.plots import entity_from_sample
 
     # Build patient/entity mappings
     high_tf_set = set(high_tf_samples)

@@ -1,7 +1,7 @@
-# cfDNA Copy-Number Roundup
+# LOCATE
 
 Unified toolkit for copy-number analysis of cell-free DNA samples from two sources:
-- **ichorCNA** output (broad CNAs + focal amplifications + longitudinal comparison)
+- **LOCATE** output (broad CNAs + focal amplifications + longitudinal comparison)
 - **cBioPortal** segmentation files (broad CNAs + focal amplifications across entities)
 
 ---
@@ -21,17 +21,17 @@ reinstalling.
 
 ## Usage
 
-### ichorCNA workflow
+### LOCATE workflow
 
 ```bash
-pixi run cfdna-cnv ichorcna \
+pixi run cfdna-cnv locate \
     --dir-1mb    output_1Mbp \
     --dir-50kb   output_50kbp \
-    --output     results/ichorcna \
+    --output     results/locate \
     --cosmic-cgc ref/CancerGeneCensus.tsv
 
 # Skip validation for large cohorts
-pixi run cfdna-cnv ichorcna \
+pixi run cfdna-cnv locate \
     --dir-1mb  output_1Mbp \
     --dir-50kb output_50kbp \
     --skip-validation \
@@ -39,13 +39,13 @@ pixi run cfdna-cnv ichorcna \
     --focal-max-bp 500000
 ```
 
-**All ichorCNA arguments:**
+**All LOCATE arguments:**
 
 | Flag | Default | Description |
 |---|---|---|
-| `--dir-1mb` | required | 1 Mbp ichorCNA output directory |
-| `--dir-50kb` | required | 50 kbp ichorCNA output directory |
-| `--output` | `ichorcna_results` | Output directory |
+| `--dir-1mb` | required | 1 Mbp LOCATE input directory (ichorCNA output) |
+| `--dir-50kb` | required | 50 kbp LOCATE input directory (ichorCNA output) |
+| `--output` | `locate_results` | Output directory |
 | `--tf-threshold` | `0.03` | Minimum tumor fraction (3%) |
 | `--amp-min-cn` | `3` | Minimum CN to call amplification |
 | `--focal-min-bp` | `50000` | Minimum focal amp segment size |
@@ -117,13 +117,13 @@ pixi run cfdna-cnv cbio \
 src/cfdna_cnv/
 ├── cli.py                   ← entry point, subcommand routing
 ├── commands/
-│   ├── ichorcna_cmd.py      ← ichorCNA workflow (7 steps)
+│   ├── locate_cmd.py      ← LOCATE workflow (7 steps)
 │   └── cbio_cmd.py          ← cBioPortal workflow (4 steps)
 ├── common/
 │   ├── constants.py         ← hg38 lengths, thresholds, palette
 │   ├── io.py                ← file discovery, seg parsing, alteration calling
 │   └── cosmic.py            ← COSMIC CGC loader + annotator
-├── ichorcna/
+├── locate/
 │   ├── qc.py                ← incomplete run detection, seg validation
 │   ├── broad_cna.py         ← streaming broad CNA frequencies
 │   ├── focal_amp.py         ← focal amp detection + streaming + aggregation
