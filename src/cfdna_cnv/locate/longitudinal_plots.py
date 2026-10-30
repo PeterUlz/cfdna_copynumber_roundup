@@ -763,6 +763,7 @@ def plot_longitudinal_combined(
         logr_ylim:            tuple[float, float] = (-2.5, 2.5),
         delta_ylim:           tuple[float, float] = (-3.0, 3.0),
         focal_tsv:            Path | None = None,
+        focal_regions:        list[dict] | None = None,
         max_noise:            float | None = 0.15,
         min_signal:           float | None = None,
         seg_path_a_segs:      Path | None = None,
@@ -964,11 +965,12 @@ def plot_longitudinal_combined(
                  f"altered={frac_b:.3f}")
 
     # ── Focal amp regions ────────────────────────────────────────────────────
-    focal_regions: list[dict] = []
-    if focal_tsv is not None:
-        focal_regions = _merge_overlapping(
-            _build_focal_annotations(focal_tsv, patient)
-        )
+    if focal_regions is None:
+        focal_regions = []
+        if focal_tsv is not None:
+            focal_regions = _merge_overlapping(
+                _build_focal_annotations(focal_tsv, patient)
+            )
 
     # ── Render helper ────────────────────────────────────────────────────────
     def _render(ba, bb, df_diff, out_path, label, clean=False, pub=False):

@@ -2,7 +2,7 @@
 cfdna-cnv  —  cfDNA copy-number analysis toolkit
 
 Full pipeline:
-    locate   Analyze ichorCNA output (broad CNA + focal amps + longitudinal)
+    ichorcna   Analyze ichorCNA output (broad CNA + focal amps + longitudinal)
     cbio       Analyze cBioPortal segmentation files (broad CNA + focal amps)
 
 Focused commands (ichorCNA data):
@@ -73,7 +73,7 @@ def _add_focal_amp_args(p: argparse.ArgumentParser) -> None:
 
 
 # ---------------------------------------------------------------------------
-# locate — full pipeline (unchanged)
+# ichorcna — full pipeline (unchanged)
 # ---------------------------------------------------------------------------
 
 def _build_locate_parser(sub: argparse._SubParsersAction) -> None:
@@ -328,7 +328,7 @@ def _run_compare_samples(args: argparse.Namespace) -> None:
     import re
     from pathlib import Path as _Path
 
-    from .common.io import find_sample_files, normalize_sample_name
+    from .common.io import find_sample_files, normalize_sample_name, parse_params
     from .common.cosmic import load_cosmic_cgc, annotate_with_cgc
     from .locate.longitudinal_plots import plot_longitudinal_combined
 
@@ -349,14 +349,9 @@ def _run_compare_samples(args: argparse.Namespace) -> None:
     if dir_1mb is not None:
         params_files = find_sample_files(dir_1mb, ".params.txt")
         for samp, ppath in params_files.items():
-            try:
-                import re as _re
-                txt = ppath.read_text()
-                m = _re.search(r"tumor_fraction\s*=\s*([0-9.]+)", txt)
-                if m:
-                    tf_lookup[samp] = float(m.group(1))
-            except Exception:
-                pass
+            tf = parse_params(ppath)
+            if tf is not None:
+                tf_lookup[samp] = tf
         print(f"  Loaded TF for {len(tf_lookup)} samples from params files.")
 
     # ── Build list of (sample_a, sample_b, tf_a, tf_b, label) tuples ─────
@@ -410,11 +405,11 @@ def _run_compare_samples(args: argparse.Namespace) -> None:
                   f"{', '.join(available)}")
             continue
 
-        # Resolve TFs
-        tf_a = tf_a_arg or tf_lookup.get(sa) or tf_lookup.get(
-            normalize_sample_name(sa))
-        tf_b = tf_b_arg or tf_lookup.get(sb) or tf_lookup.get(
-            normalize_sample_name(sb))
+        # Resolve TFs  (use explicit arg when provided, else look up from params)
+        tf_a = tf_a_arg if tf_a_arg is not None else (
+            tf_lookup.get(sa) or tf_lookup.get(normalize_sample_name(sa)))
+        tf_b = tf_b_arg if tf_b_arg is not None else (
+            tf_lookup.get(sb) or tf_lookup.get(normalize_sample_name(sb)))
         if tf_a is None or tf_b is None:
             missing_tf = ([sa] if tf_a is None else []) + \
                          ([sb] if tf_b is None else [])
